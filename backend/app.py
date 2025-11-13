@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from datetime import datetime
 import json
 import os
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 LOG_FILE = "usage_logs.jsonl"  # JSON Lines format (one JSON per line)
 
@@ -51,6 +53,12 @@ def get_logs():
     """Returns all logged entries."""
     logs = read_logs()
     return jsonify({"count": len(logs), "records": logs}), 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint."""
+    return jsonify({"status": "ok", "message": "Backend is running"}), 200
 
 
 if __name__ == "__main__":

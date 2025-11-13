@@ -1,0 +1,98 @@
+11/7/2025
+
+Research:
+1. Making a facial-recognition dataset
+https://pyimagesearch.com/2018/06/11/how-to-build-a-custom-face-recognition-dataset/
+https://realpython.com/face-recognition-with-python/?utm_source=chatgpt.com
+https://pyimagesearch.com/2018/06/18/face-recognition-with-opencv-python-and-deep-learning/?utm_source=chatgpt.com 
+2. Two cameras simultaneously
+https://medium.com/%40elvenkim1/how-to-use-multiple-cameras-with-opencv-71fcac2d4af8?utm_source=chatgpt.com
+https://stackoverflow.com/questions/29664399/capturing-video-from-two-cameras-in-opencv-at-once?utm_source=chatgpt.com
+https://www.opencvhelp.org/tutorials/advanced/how-to-capture-multiple-camera-streams-opencv/?utm_source=chatgpt.com 
+3. Bounding box on sink & detect dishes in/out
+https://learnopencv.com/yolov8-object-tracking-and-counting-with-opencv/?utm_source=chatgpt.com
+https://blog.roboflow.com/yolov8-tracking-and-counting/?utm_source=chatgpt.com
+https://roboflow.com/how-to-count/yolov8?utm_source=chatgpt.com 
+
+
+
+
+10/28/25
+
+Goals for this week:
+
+Find a good dataset (open images dish classes?)
+Camera software
+Train a basic model on the dataset (Rafa, Dylan)
+WHEN model successful, work on logic to detect dish going into sink
+
+Frontend design, barebones. (Max, Emerson)
+Timestamp and photo. 
+Potentially video clips lowlights lol 
+Research clipping Videos from frontend (GARMIN) (DQL aka SQL)
+Backend (Linden, Hugo, Owen)
+input: (image, dish, name)
+logic: stores in database, sends notifications
+Research (Dylan, Kemma, DQL)
+making our own facial recognition dataset 
+how we could have two cameras going
+maybe set bounding box on sink in opencv and detect if dishes go in and out
+
+
+Week after:
+
+Test model on phone camera software (get them hooked up)
+
+Detect how long the dish was left, find the exact moment and save the video 
+
+Trigger events on detections (hella logic)
+
+Facial recog?
+
+
+
+
+
+Week after: 
+
+
+
+
+
+
+
+Video Clipping (dql)
+
+Record/capture short clips when AI detects someone putting dishes into the sink using a live camera feed that is streamed from an iphone using an app like iVCam
+
+Findings:
+Feasible on the frontend
+If the frontend app is a web app we can use the browser’s built-in MediaRecorder API to record from a live camera
+No backend video processing is required
+
+Simple Workflow:
+Camera feed
+iVCam or other application to stream iPhone camera to laptop
+Laptop treats it as a normal webcam
+Frontend
+Browser keeps a rolling buffer of the live stream using MediaRecorder
+AI
+When it detects a dish entering the sink region, it triggers an event
+Clipping
+When AI triggers, export recent buffered footage as a short video clip (e.g. 10 seconds before and after event)
+(optional) Capture a still frame at the same timestamp for notification
+Upload & storage
+Send the clip/photo to the backend for storage and notification
+
+
+Facial recognition dataset
+Each housemate: around 30-50 photos in kitchen lighting
+Different angles, expressions, distance, with/without glasses
+Libraries like face_recognition can convert photos into "face embeddings" (128-number vectors that represent each face) and find matches
+
+Two camera setup
+Plug in two USB webcams for overhead and side angle
+Finding the right physical mounting positions and make sure both have good lighting
+Open both cameras simultaneously using cv2.VideoCapture(0) and cv2.VideoCapture(1)
+Each camera gets an ID number (0, 1, 2, etc.)
+
