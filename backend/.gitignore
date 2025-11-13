@@ -1,0 +1,28 @@
+# Python cache and build files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Log and data files
+usage_logs.jsonl
+*.log
+
+# Environment variables
+.env
