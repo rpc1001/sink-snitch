@@ -1,40 +1,51 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-build/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 
+# Virtual Environment
 .venv/
+venv/
+ENV/
+env/
 
+# Jupyter Notebook
 .ipynb_checkpoints/
-*.ipynb_meta
+*.ipynb_checkpoints
 
-*.log
-*.tmp
-*.bak
-*.old
-
-data/
-datasets/
-outputs/
-runs/
-checkpoints/
-logs/
-tmp/
-wandb/
-mlruns/
-lightning_logs/
-
+# Model weights (large files)
 *.pt
 *.pth
-*.ckpt
 *.onnx
-*.h5
-*.pkl
+*.torchscript
 
-.env
-.env.*
-config.json
-secrets.json
+# Dataset folders (large)
+combined_dishes/
+*Dirty-Kitchen*/
+*dishes-finder*/
+*my-first-project*/
+
+# Training outputs
+training/
+results/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Temporary files
+*.tmp
+*.log
+live_test_frames/
+
