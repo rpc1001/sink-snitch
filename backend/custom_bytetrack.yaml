@@ -1,0 +1,19 @@
+# Custom ByteTrack config for Sink Snitch
+# Optimized for stationary objects with changing lighting
+
+tracker_type: bytetrack
+
+# Higher thresholds = less likely to create duplicate tracks
+track_high_thresh: 0.5      # Only track confident detections (was 0.25)
+track_low_thresh: 0.1       # Keep this low for recovery
+new_track_thresh: 0.6       # Much higher - don't create new tracks easily (was 0.25)
+
+# Longer buffer = keep lost tracks longer (good for occlusions/lighting changes)
+track_buffer: 60            # Keep lost tracks for 60 frames (~2 seconds) (was 30)
+
+# Higher match threshold = stricter matching
+match_thresh: 0.7           # Slightly lower to allow for detection variance (was 0.8)
+
+# Fuse detection score with motion for more stable matching
+fuse_score: True
+

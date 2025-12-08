@@ -1,7 +1,13 @@
-import type { LogUsageRequest, LogUsageResponse, GetLogsResponse } from '../types';
+import type { 
+  LogUsageRequest, 
+  LogUsageResponse, 
+  GetLogsResponse,
+  GetViolationsResponse,
+  SinkRegion 
+} from '../types';
 
 // Use environment variable if set, otherwise fall back to proxy path
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
 
 export async function logUsage(data: LogUsageRequest): Promise<LogUsageResponse> {
   const response = await fetch(`${API_BASE}/log_usage`, {
@@ -30,3 +36,53 @@ export async function getLogs(): Promise<GetLogsResponse> {
   return response.json();
 }
 
+export async function getViolations(): Promise<GetViolationsResponse> {
+  const response = await fetch(`${API_BASE}/get_violations`);
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getSinkRegion(): Promise<{ sink_region: SinkRegion }> {
+  const response = await fetch(`${API_BASE}/sink_region`);
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function setSinkRegion(region: SinkRegion): Promise<{ status: string; sink_region: SinkRegion }> {
+  const response = await fetch(`${API_BASE}/sink_region`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ sink_region: region }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getDetectionStatus(): Promise<{ running: boolean; tracked_objects: number }> {
+  const response = await fetch(`${API_BASE}/detection/status`);
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export function getSocketUrl(): string {
+  return API_BASE;
+}
