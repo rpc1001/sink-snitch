@@ -62,6 +62,12 @@ export function ViolationsPanel() {
     return `${API_BASE}/images/${filename}`;
   };
 
+  // Get video clip URL
+  const getClipUrl = (filename: string | undefined) => {
+    if (!filename) return null;
+    return `${API_BASE}/clips/${filename}`;
+  };
+
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id);
   };
@@ -145,6 +151,17 @@ export function ViolationsPanel() {
                         )}
                       </div>
                     </div>
+                    {violation.violation_clip && (
+                      <div className="violation-video-container">
+                        <h4>OK Garmin</h4>
+                        <video 
+                          className="violation-video"
+                          controls 
+                          src={getClipUrl(violation.violation_clip) || undefined}
+                        />
+                        <p className="video-hint">Includes ~5s before first detection.</p>
+                      </div>
+                    )}
                     <div className="violation-extra-info">
                       <p><strong>Track ID:</strong> #{violation.track_id}</p>
                       <p><strong>Detected As:</strong> {violation.class}</p>
@@ -161,4 +178,3 @@ export function ViolationsPanel() {
     </div>
   );
 }
-

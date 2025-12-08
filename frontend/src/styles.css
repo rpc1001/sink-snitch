@@ -755,6 +755,7 @@ tbody tr:hover {
   border: 1px solid #dee2e6;
   object-fit: contain;
   background: #f8f9fa;
+  /* display: block; */
 }
 
 .no-image {
@@ -779,9 +780,26 @@ tbody tr:hover {
   margin: 0.25rem 0;
 }
 
+.violation-video-container {
+  margin-top: 1rem;
+}
+
+.violation-video {
+  width: 100%;
+  max-width: 600px;
+  border-radius: 8px;
+  border: 1px solid #dee2e6;
+  background: #000;
+}
+
+.video-hint {
+  color: #666;
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
+}
+
 @media (max-width: 600px) {
   .violation-images {
     grid-template-columns: 1fr;
   }
 }
-

@@ -56,6 +56,7 @@ export interface Violation {
   duration_seconds: number;
   entry_image?: string;
   violation_image?: string;
+  violation_clip?: string;
 }
 
 export interface GetViolationsResponse {

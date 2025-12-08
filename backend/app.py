@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from datetime import datetime
+from collections import deque
 import json
 import os
 import time
@@ -17,9 +18,13 @@ LOG_FILE = "usage_logs.jsonl"
 VIOLATIONS_FILE = "violations.jsonl"
 CONFIG_FILE = "sink_config.json"
 IMAGES_DIR = "violation_images"
+VIDEO_CLIPS_DIR = "violation_clips"
+PRE_ROLL_SECONDS = 5
+CLIP_FPS = 15
 
 # Create images directory
 os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(VIDEO_CLIPS_DIR, exist_ok=True)
 
 # Global state
 sink_region = None  # (x1, y1, x2, y2) in percentages (0-1)
@@ -35,6 +40,9 @@ tracked_objects = {}  # {track_id: {first_seen, last_seen, class, violation_logg
 track_id_mapping = {}  # Maps new track IDs to existing ones if they overlap
 VIOLATION_THRESHOLD = 20  # 20 seconds for testing (change to 30 * 60 for production)
 IOU_MERGE_THRESHOLD = 0.9  # If IoU > this, consider it the same object (very strict)
+video_buffer = deque(maxlen=int(PRE_ROLL_SECONDS * CLIP_FPS)) # Rolling buffer for video clips
+active_clips = {}
+last_buffer_time = 0.0
 
 # ============== LOGGING ==============
 def log_to_file(entry, filepath=LOG_FILE):
@@ -131,6 +139,58 @@ def frame_to_base64(frame):
     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return base64.b64encode(buffer).decode('utf-8')
 
+# Video Clipping
+def update_video_buffer(frame):
+    """ Store frames in a rolling buffer so clips include pre-roll context """
+    
+    global last_buffer_time
+    if frame is None:
+        return
+    current_time = time.time()
+    if current_time - last_buffer_time >= 1.0 / CLIP_FPS:
+        video_buffer.append(frame.copy())
+        last_buffer_time = current_time
+
+def start_clip_for_track(track_id):
+    """ Send a clip with the buffer when a new object enters the sink. """
+
+    if track_id in active_clips:
+        return 
+    active_clips[track_id] = {"frames": [f.copy() for f in video_buffer]}
+
+def append_frame_to_clip(track_id, frame):
+    """ Add the current frame to the active clip for a track. """
+
+    if frame is None:
+        return
+    if track_id not in active_clips:
+        start_clip_for_track(track_id)
+    active_clips[track_id]["frames"].append(frame.copy())
+
+def finalize_clip(track_id):
+    """ Write a video clip to disk for a track that has violated. """
+
+    clip = active_clips.get(track_id, None)
+    if not clip or not clip.get("frames"):
+        return None
+    frames = clip["frames"]
+    h, w = frames[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"violation_{track_id}_{timestamp}.mp4"
+    filepath = os.path.join(VIDEO_CLIPS_DIR, filename)
+    writer = cv2.VideoWriter(filepath, fourcc, CLIP_FPS, (w, h))
+    for f in frames:
+        writer.write(f)
+    writer.release()
+    return filename
+
+def delete_clip(track_id):
+    """ Delete any in-progress clip for a track that exited without violation. """
+
+    if track_id in active_clips:
+        del active_clips[track_id]
+
 def check_violations():
     global current_frame
     current_time = time.time()
@@ -153,7 +213,8 @@ def check_violations():
                 "class": str(data["class"]),
                 "duration_seconds": int(duration),
                 "entry_image": data.get("entry_image"),
-                "violation_image": violation_image
+                "violation_image": violation_image,
+                "violation_clip": finalize_clip(track_id)
             }
             log_to_file(violation, VIOLATIONS_FILE)
             tracked_objects[track_id]["violation_logged"] = True
@@ -206,6 +267,7 @@ def run_camera_stream():
             
             # Store current frame for violation snapshots
             current_frame = frame.copy()
+            update_video_buffer(current_frame)
             
             # Run YOLO detection if enabled and model is loaded
             if detection_enabled and model is not None and sink_region is not None:
@@ -262,6 +324,9 @@ def run_camera_stream():
                         
                         if in_sink:
                             active_ids.add(effective_tid)
+                            if not tracked_objects.get(effective_tid, {}).get("violation_logged"):
+                                start_clip_for_track(effective_tid)
+                                append_frame_to_clip(effective_tid, current_frame)
                             if effective_tid not in tracked_objects:
                                 # New object entering sink - save entry image with box
                                 entry_image = save_frame_as_image(
@@ -305,6 +370,7 @@ def run_camera_stream():
                         for k, v in list(track_id_mapping.items()):
                             if v == stored_tid:
                                 del track_id_mapping[k]
+                        delete_clip(stored_tid)
                 
                 check_violations()
                 
@@ -420,6 +486,13 @@ def serve_image(filename):
     """Serve violation images."""
     from flask import send_from_directory
     return send_from_directory(IMAGES_DIR, filename), 200
+
+@app.route("/clips/<filename>", methods=["GET"])
+def serve_clip(filename):
+    """Serve violation video clips."""
+    from flask import send_from_directory
+    return send_from_directory(VIDEO_CLIPS_DIR, filename), 200
+
 
 # ============== WEBSOCKET EVENTS ==============
 @socketio.on('connect')
