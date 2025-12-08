@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import ReactPlayer from 'react-player';
 import { getViolations, API_BASE } from '../lib/api';
 import { onViolation } from '../lib/socket';
 import type { Violation } from '../types';
@@ -153,13 +154,21 @@ export function ViolationsPanel() {
                     </div>
                     {violation.violation_clip && (
                       <div className="violation-video-container">
-                        <h4>OK Garmin</h4>
+                        <h4>Violation Clip</h4>
+                        <ReactPlayer
+                          src={getClipUrl(violation.violation_clip)!}
+                          controls
+                          width="100%"
+                          height="360px"
+                          className="violation-video-player"
+                        />
+
+                        {/* <h4>OK Garmin</h4>
                         <video 
                           className="violation-video"
                           controls 
-                          src={getClipUrl(violation.violation_clip) || undefined}
-                        />
-                        <p className="video-hint">Includes ~5s before first detection.</p>
+                          src={getClipUrl(violation.violation_clip)!}
+                        /> */}
                       </div>
                     )}
                     <div className="violation-extra-info">

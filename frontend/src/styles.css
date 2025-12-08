@@ -782,12 +782,24 @@ tbody tr:hover {
 
 .violation-video-container {
   margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .violation-video {
   width: 100%;
   max-width: 600px;
   border-radius: 8px;
+  border: 1px solid #dee2e6;
+  background: #000;
+}
+
+.violation-video-player {
+  width: 100% !important;
+  border-radius: 8px;
+  overflow: hidden;
+  max-width: 600px;
   border: 1px solid #dee2e6;
   background: #000;
 }
