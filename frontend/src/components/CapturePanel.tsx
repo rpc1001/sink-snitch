@@ -18,13 +18,21 @@ const TABLEWARE_OPTIONS = [
   'Wok',
 ];
 
-export function CapturePanel() {
+// 👇 NEW: props so App can pass in a callback
+interface CapturePanelProps {
+  onLogAdded?: () => void;
+}
+
+export function CapturePanel({ onLogAdded }: CapturePanelProps) {
   const [name, setName] = useState('');
   const [tableware, setTableware] = useState('');
   const [action, setAction] = useState<'enter' | 'exit'>('enter');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitStatus, setSubmitStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [submitStatus, setSubmitStatus] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const handleCapture = (imageData: string) => {
     setCapturedImage(imageData);
@@ -33,14 +41,20 @@ export function CapturePanel() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!capturedImage) {
-      setSubmitStatus({ type: 'error', message: 'Please capture an image first' });
+      setSubmitStatus({
+        type: 'error',
+        message: 'Please capture an image first',
+      });
       return;
     }
 
     if (!name.trim() || !tableware) {
-      setSubmitStatus({ type: 'error', message: 'Please fill in all fields' });
+      setSubmitStatus({
+        type: 'error',
+        message: 'Please fill in all fields',
+      });
       return;
     }
 
@@ -56,8 +70,14 @@ export function CapturePanel() {
       };
 
       await logUsage(request);
+
+      // ✅ tell parent (App) that a log was added so logs refresh
+      if (onLogAdded) {
+        onLogAdded();
+      }
+
       setSubmitStatus({ type: 'success', message: 'Successfully logged!' });
-      
+
       // Clear form
       setName('');
       setTableware('');
@@ -66,7 +86,10 @@ export function CapturePanel() {
     } catch (error) {
       setSubmitStatus({
         type: 'error',
-        message: error instanceof Error ? error.message : 'Failed to submit log entry'
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Failed to submit log entry',
       });
     } finally {
       setIsSubmitting(false);
@@ -76,14 +99,18 @@ export function CapturePanel() {
   return (
     <div className="capture-panel">
       <h2>Log Dish Usage</h2>
-      
+
       <div className="capture-section">
         <CameraView onCapture={handleCapture} />
-        
+
         {capturedImage && (
           <div className="image-preview">
             <p>Captured Image:</p>
-            <img src={capturedImage} alt="Captured snapshot" className="preview-image" />
+            <img
+              src={capturedImage}
+              alt="Captured snapshot"
+              className="preview-image"
+            />
           </div>
         )}
       </div>
@@ -110,8 +137,10 @@ export function CapturePanel() {
             required
           >
             <option value="">Select tableware</option>
-            {TABLEWARE_OPTIONS.map(option => (
-              <option key={option} value={option}>{option}</option>
+            {TABLEWARE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
             ))}
           </select>
         </div>
@@ -146,4 +175,3 @@ export function CapturePanel() {
     </div>
   );
 }
-

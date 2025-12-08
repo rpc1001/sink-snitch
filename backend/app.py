@@ -24,16 +24,23 @@ def read_logs():
         return [json.loads(line.strip()) for line in f if line.strip()]
 
 
-@app.route("/log_usage", methods=["POST"])
+def write_logs(entries):
+    """Overwrite the log file with the given list of entries."""
+    with open(LOG_FILE, "w") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
+@app.route("/api/log_usage", methods=["POST"])
 def log_usage():
     """Logs a usage entry."""
-    data = request.get_json()
+    data = request.get_json() or {}
 
     required_fields = ["name", "tableware", "image", "action"]
     if not all(field in data for field in required_fields):
         return jsonify({"error": "Missing required fields"}), 400
 
-    if data["action"] not in ["enter", "exit"]:
+    if data.get("action") not in ["enter", "exit"]:
         return jsonify({"error": "Action must be 'enter' or 'exit'"}), 400
 
     entry = {
@@ -41,21 +48,43 @@ def log_usage():
         "name": data["name"],
         "tableware": data["tableware"],
         "image": data["image"],
-        "action": data["action"]
+        "action": data["action"],
     }
 
     log_to_file(entry)
     return jsonify({"status": "logged", "entry": entry}), 201
 
 
-@app.route("/get_logs", methods=["GET"])
+@app.route("/api/get_logs", methods=["GET"])
 def get_logs():
     """Returns all logged entries."""
     logs = read_logs()
     return jsonify({"count": len(logs), "records": logs}), 200
 
 
-@app.route("/health", methods=["GET"])
+@app.route("/api/delete_log", methods=["POST"])
+def delete_log():
+    """Delete a single log entry by timestamp."""
+    data = request.get_json() or {}
+    ts = data.get("timestamp")
+
+    if not ts:
+        return jsonify({"error": "Missing 'timestamp' field"}), 400
+
+    logs = read_logs()
+    remaining = [entry for entry in logs if entry.get("timestamp") != ts]
+
+    if len(remaining) == len(logs):
+        # No entry matched that timestamp
+        return jsonify({"error": "Log entry not found"}), 404
+
+    write_logs(remaining)
+    return jsonify(
+        {"status": "deleted", "timestamp": ts, "remaining": len(remaining)}
+    ), 200
+
+
+@app.route("/api/health", methods=["GET"])
 def health():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "Backend is running"}), 200

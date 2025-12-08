@@ -1,20 +1,35 @@
-import type { LogUsageRequest, LogUsageResponse, GetLogsResponse } from '../types';
+import type {
+  LogUsageRequest,
+  LogUsageResponse,
+  GetLogsResponse,
+} from '../types';
 
-// Use environment variable if set, otherwise fall back to proxy path
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const API_BASE = '/api';
 
-export async function logUsage(data: LogUsageRequest): Promise<LogUsageResponse> {
+async function handleJsonOrTextError(response: Response): Promise<never> {
+  try {
+    const data = await response.json();
+    const message =
+      (data && (data.error || data.message)) ||
+      `HTTP error! status: ${response.status}`;
+    throw new Error(message);
+  } catch {
+    const text = await response.text();
+    throw new Error(text || `HTTP error (non-JSON) status: ${response.status}`);
+  }
+}
+
+export async function logUsage(
+  data: LogUsageRequest
+): Promise<LogUsageResponse> {
   const response = await fetch(`${API_BASE}/log_usage`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+    await handleJsonOrTextError(response);
   }
 
   return response.json();
@@ -24,9 +39,20 @@ export async function getLogs(): Promise<GetLogsResponse> {
   const response = await fetch(`${API_BASE}/get_logs`);
 
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+    await handleJsonOrTextError(response);
   }
 
   return response.json();
 }
 
+export async function deleteLog(timestamp: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/delete_log`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timestamp }),
+  });
+
+  if (!response.ok) {
+    await handleJsonOrTextError(response);
+  }
+}
