@@ -9,6 +9,7 @@ export function ViolationsPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<Record<string, string>>({});
 
   const fetchViolations = async () => {
     try {
@@ -71,6 +72,30 @@ export function ViolationsPanel() {
 
   const toggleExpand = (id: string) => {
     setExpandedId(expandedId === id ? null : id);
+  };
+
+  const handleDownload = async (clipUrl: string, id: string) => {
+    try {
+      setDownloadStatus(prev => ({ ...prev, [id]: 'downloading' }));
+      const response = await fetch(clipUrl, { mode: 'cors' });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const filename = clipUrl.split('/').pop() || 'violation_clip.mp4';
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setDownloadStatus(prev => ({ ...prev, [id]: '' }));
+    } catch (err) {
+      console.error('Download failed', err);
+      setDownloadStatus(prev => ({ ...prev, [id]: 'Download failed' }));
+    }
   };
 
   if (loading) {
@@ -155,13 +180,16 @@ export function ViolationsPanel() {
                     {violation.violation_clip && (
                       <div className="violation-video-container">
                         <h4>Violation Clip</h4>
-                        <ReactPlayer
-                          src={getClipUrl(violation.violation_clip)!}
-                          controls
-                          width="100%"
-                          height="360px"
-                          className="violation-video-player"
-                        />
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => handleDownload(getClipUrl(violation.violation_clip)!, id)}
+                          disabled={downloadStatus[id] === 'downloading'}
+                        >
+                          {downloadStatus[id] === 'downloading' ? 'Downloading…' : 'Download clip'}
+                        </button>
+                        {downloadStatus[id] && downloadStatus[id] !== 'downloading' && (
+                          <p className="hint">{downloadStatus[id]}</p>
+                        )}
 
                         {/* <h4>OK Garmin</h4>
                         <video 
