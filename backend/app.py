@@ -489,17 +489,10 @@ def load_model_and_start_detection():
     
     try:
         from ultralytics import YOLO
-        # Use YOLO-World for open vocabulary detection
-        model = YOLO("yolov8s-world.pt")
-        model.set_classes([
-            "plate", "bowl", "cup", "mug", "glass",
-            "pot", "pan", "frying pan", "saucepan",
-            "fork", "spoon", "knife", "spatula",
-            "bottle", "jar", "tupperware", "container",
-            "cutting board", "colander", "strainer"
-        ])
-        print("YOLO-World model loaded successfully")
-        print(f"Classes set: {model.names}")
+        # Use fine-tuned dish detector model
+        model = YOLO("dish_detector.pt")
+        print("Fine-tuned dish detector model loaded successfully")
+        print(f"Model classes: {model.names}")
         
         # Now enable detection
         tracked_objects = {}
