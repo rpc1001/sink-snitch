@@ -26,6 +26,7 @@ usage_logs.jsonl
 sink_config.json
 violation_clips/
 violation_images/
+notification_config.json
 
 
 # Environment variables

@@ -1,4 +1,6 @@
 ultralytics
-openimages
-scikit-learn
-pyyaml
+roboflow
+torch
+matplotlib
+opencv-python
+pandas

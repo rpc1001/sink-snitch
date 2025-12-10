@@ -1,0 +1,12 @@
+
+Validation Set:
+  mAP@50:    0.8129
+  mAP@50-95: 0.6061
+  Precision: 0.8180
+  Recall:    0.7234
+
+Test Set:
+  mAP@50:    0.7924
+  mAP@50-95: 0.5867
+  Precision: 0.7880
+  Recall:    0.7164
