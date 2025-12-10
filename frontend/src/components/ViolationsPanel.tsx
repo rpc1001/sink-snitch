@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { API_BASE, getViolations, deleteViolation } from '../lib/api';
+import { API_BASE, getViolations, deleteViolation, clearViolations } from '../lib/api';
 import { onViolation } from '../lib/socket';
 import type { Violation } from '../types';
 
@@ -14,6 +14,7 @@ export function ViolationsPanel({
   violations,
   setViolations,
 }: ViolationsPanelProps) {
+  const MAX_VIOLATIONS = 15;
   const [filter, setFilter] = useState<Filter>('active');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +29,7 @@ export function ViolationsPanel({
   // Listen for real-time violations
   useEffect(() => {
     const cleanup = onViolation((violation) => {
-      setViolations(prev => [violation as Violation, ...prev]);
+      setViolations(prev => [violation as Violation, ...prev].slice(0, MAX_VIOLATIONS));
     });
     return cleanup;
   }, [setViolations]);
@@ -39,10 +40,26 @@ export function ViolationsPanel({
       setError(null);
       const resp = await getViolations();
       // Server returns oldest-first; reverse so newest are on top
-      setViolations((resp.records as Violation[]).slice().reverse());
+      setViolations((resp.records as Violation[]).slice().reverse().slice(0, MAX_VIOLATIONS));
     } catch (err) {
       console.error(err);
       setError('Failed to load violations');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    const ok = window.confirm('Clear all violations?');
+    if (!ok) return;
+    try {
+      setLoading(true);
+      await clearViolations();
+      setViolations([]);
+      setExpandedId(null);
+    } catch (err) {
+      console.error(err);
+      setError('Failed to clear violations');
     } finally {
       setLoading(false);
     }
@@ -177,6 +194,15 @@ export function ViolationsPanel({
             disabled={loading}
           >
             ⟳ Refresh
+          </button>
+          <button
+            type="button"
+            className="refresh-button refresh-button--small"
+            onClick={handleClearAll}
+            disabled={loading || !violations.length}
+            title="Clear all violations"
+          >
+            🗑 Clear
           </button>
         </div>
       </div>

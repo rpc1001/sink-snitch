@@ -3,6 +3,7 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from datetime import datetime, timezone
 from collections import deque
+import threading
 import json
 import os
 import time
@@ -55,6 +56,44 @@ video_buffer = deque(maxlen=int(PRE_ROLL_SECONDS * CLIP_FPS)) # Rolling buffer f
 active_clips = {}
 last_buffer_time = 0.0
 notification_config = {"webhook_url": None}
+violation_queue = deque()  # queue of violations to process in background
+violation_worker_started = False
+
+
+def process_violation_queue():
+    """Background worker to handle violation snapshots/clips and emit events."""
+    while True:
+        try:
+            if violation_queue:
+                item = violation_queue.popleft()
+                violation = item.get("violation", {})
+                frame = item.get("frame")
+                label = item.get("label")
+                box = violation.get("box")
+                track_id = violation.get("track_id")
+
+                # Save violation image
+                violation_image = save_frame_as_image(frame, f"violation_{track_id}", box=box, label=label)
+
+                # Finalize clip
+                violation_clip = finalize_clip(track_id)
+
+                violation["violation_image"] = violation_image
+                violation["violation_clip"] = violation_clip
+
+                # Log and emit
+                log_to_file(violation, VIOLATIONS_FILE)
+                socketio.emit('violation', violation)
+
+                # Send notification asynchronously (already background)
+                send_discord_notification(violation)
+
+                print(f"Violation processed: {violation}")
+            else:
+                socketio.sleep(0.01)
+        except Exception as e:
+            print(f"Violation worker error: {e}")
+            socketio.sleep(0.05)
 
 # ============== LOGGING ==============
 def log_to_file(entry, filepath=LOG_FILE):
@@ -394,16 +433,20 @@ def check_violations():
                 "class": str(data["class"]),
                 "duration_seconds": int(duration),
                 "entry_image": data.get("entry_image"),
-                "violation_image": violation_image,
-                "violation_clip": finalize_clip(track_id),
-                "status": "occluded" if is_occluded else "visible"
+                "violation_image": None,  # will be filled by worker
+                "violation_clip": None,   # will be filled by worker
+                "status": "occluded" if is_occluded else "visible",
+                "box": data.get("box")
             }
-            log_to_file(violation, VIOLATIONS_FILE)
+            # Enqueue for background processing to avoid blocking frame loop
+            if current_frame is not None:
+                violation_queue.append({
+                    "violation": violation,
+                    "frame": current_frame.copy(),
+                    "label": f"#{track_id} {data['class']} - {status_str} ({int(duration)}s)"
+                })
             tracked_objects[track_id]["violation_logged"] = True
-            socketio.emit('violation', violation)
-            # Send notification without blocking detection loop
-            socketio.start_background_task(send_discord_notification, violation)
-            print(f"Violation logged: {violation}")
+            print(f"Violation enqueued: {violation['id']} ({violation['class']})")
 
 def load_yolo_model():
     """Load YOLO model - called from background task."""
@@ -712,6 +755,18 @@ def delete_violation(violation_id):
     return jsonify({"status": "deleted", "id": violation_id}), 200
 
 
+@app.route("/violations", methods=["DELETE"])
+def clear_violations():
+    """Clear all violations."""
+    if os.path.exists(VIOLATIONS_FILE):
+        try:
+            open(VIOLATIONS_FILE, "w").close()
+        except Exception as e:
+            return jsonify({"error": f"Failed to clear violations: {e}"}), 500
+    socketio.emit("violations_cleared")
+    return jsonify({"status": "cleared"}), 200
+
+
 @app.route("/sink_region", methods=["GET", "POST"])
 def handle_sink_region():
     global sink_region
@@ -880,6 +935,7 @@ def handle_set_sink_region(data):
 # ============== STARTUP ==============
 load_config()
 load_notification_config()
+socketio.start_background_task(process_violation_queue)
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, host='0.0.0.0', port=5001)

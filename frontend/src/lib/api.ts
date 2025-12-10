@@ -149,3 +149,14 @@ export async function setViolationThreshold(seconds: number): Promise<{ status: 
   }
   return response.json();
 }
+
+export async function clearViolations(): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/violations`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+}
