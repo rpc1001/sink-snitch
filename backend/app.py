@@ -659,6 +659,31 @@ def get_violations():
     violations = read_logs(VIOLATIONS_FILE)
     return jsonify({"count": len(violations), "records": violations}), 200
 
+@app.route("/violations/<violation_id>", methods=["DELETE"])
+def delete_violation(violation_id):
+    """
+    Delete a violation from the JSONL file by its id.
+    """
+    if not os.path.exists(VIOLATIONS_FILE):
+        return jsonify({"error": "No violations file"}), 404
+
+    violations = read_logs(VIOLATIONS_FILE)
+    remaining = [v for v in violations if str(v.get("id")) != str(violation_id)]
+
+    if len(remaining) == len(violations):
+        return jsonify({"error": "Violation not found"}), 404
+
+    # Rewrite file without the deleted violation
+    with open(VIOLATIONS_FILE, "w") as f:
+        for v in remaining:
+            f.write(json.dumps(v) + "\n")
+
+    # Optionally notify any connected clients
+    socketio.emit("violation_deleted", {"id": violation_id})
+
+    return jsonify({"status": "deleted", "id": violation_id}), 200
+
+
 @app.route("/sink_region", methods=["GET", "POST"])
 def handle_sink_region():
     global sink_region

@@ -6,8 +6,8 @@ import type {
   SinkRegion
 } from '../types';
 
-// Use environment variable if set, otherwise fall back to proxy path
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
+const envApiBase = (import.meta as any)?.env?.VITE_API_BASE_URL;
+export const API_BASE = envApiBase || 'http://localhost:5001';
 
 export async function logUsage(data: LogUsageRequest): Promise<LogUsageResponse> {
   const response = await fetch(`${API_BASE}/log_usage`, {
@@ -85,6 +85,19 @@ export async function getDetectionStatus(): Promise<{ running: boolean; tracked_
 
 export function getSocketUrl(): string {
   return API_BASE;
+}
+
+export async function deleteViolation(id: string): Promise<{ status: string; id: string }> {
+  const response = await fetch(`${API_BASE}/violations/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
 }
 
 export async function getWebhookConfig(): Promise<{ configured: boolean }> {
