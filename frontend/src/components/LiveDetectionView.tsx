@@ -1,10 +1,20 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
-import { getSocketUrl, getSinkRegion, getViolationThreshold, setViolationThreshold } from '../lib/api';
+import { getSinkRegion, getViolationThreshold, setViolationThreshold } from '../lib/api';
+import {
+  getSocket,
+  onFrame,
+  onStatus,
+  onError,
+  onSinkRegion,
+  onConnect,
+  onDisconnect,
+  setSinkRegionSocket,
+  startDetection as emitStartDetection,
+  stopDetection as emitStopDetection
+} from '../lib/socket';
 import type { FrameData, SinkRegion } from '../types';
 
 export function LiveDetectionView() {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const [cameraRunning, setCameraRunning] = useState(false);
   const [detectionEnabled, setDetectionEnabled] = useState(false);
@@ -20,45 +30,33 @@ export function LiveDetectionView() {
   const [savingThreshold, setSavingThreshold] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const frameTimer = useRef<number | null>(null);
 
-  // Initialize socket
   useEffect(() => {
-    const newSocket = io(getSocketUrl(), {
-      transports: ['websocket', 'polling'],
-    });
-
-    newSocket.on('connect', () => {
-      setConnected(true);
-      setError(null);
-    });
-
-    newSocket.on('disconnect', () => {
-      setConnected(false);
-      setCameraRunning(false);
-      setDetectionEnabled(false);
-    });
-
-    newSocket.on('status', (data: { message: string; camera_running?: boolean; detection_enabled?: boolean }) => {
+    const socket = getSocket();
+    const offStatus = onStatus((data: { message: string; camera_running?: boolean; detection_enabled?: boolean }) => {
       setStatusMessage(data.message);
       if (data.camera_running !== undefined) setCameraRunning(data.camera_running);
       if (data.detection_enabled !== undefined) setDetectionEnabled(data.detection_enabled);
     });
-
-    newSocket.on('error', (data: { message: string }) => {
-      setError(data.message);
+    const offError = onError((data: { message: string }) => setError(data.message));
+    const offFrame = onFrame((data: FrameData) => setFrameData(data));
+    const offSink = onSinkRegion((data: { sink_region: SinkRegion }) => setSinkRegion(data.sink_region));
+    const offConnect = onConnect(() => {
+      setConnected(true);
+      setError(null);
+    });
+    const offDisconnect = onDisconnect(() => {
+      setConnected(false);
+      setCameraRunning(false);
+      setDetectionEnabled(false);
+      stopFrameLoop();
+      stopCamera();
     });
 
-    newSocket.on('frame', (data: FrameData) => {
-      setFrameData(data);
-    });
-
-    newSocket.on('sink_region', (data: { sink_region: SinkRegion }) => {
-      setSinkRegion(data.sink_region);
-    });
-
-    setSocket(newSocket);
-
-    // Load initial sink region
     getSinkRegion()
       .then(data => setSinkRegion(data.sink_region))
       .catch(err => console.error('Failed to load sink region:', err));
@@ -73,11 +71,18 @@ export function LiveDetectionView() {
       .catch(err => console.error('Failed to load violation threshold:', err));
 
     return () => {
-      newSocket.disconnect();
+      offStatus();
+      offError();
+      offFrame();
+      offSink();
+      offConnect();
+      offDisconnect();
+      stopFrameLoop();
+      stopCamera();
+      socket.disconnect();
     };
   }, []);
 
-  // Drawing handlers
   const getRelativePosition = useCallback((e: React.MouseEvent): { x: number; y: number } | null => {
     if (!containerRef.current) return null;
     const rect = containerRef.current.getBoundingClientRect();
@@ -87,7 +92,7 @@ export function LiveDetectionView() {
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (detectionEnabled) return; // Don't allow drawing while detection is running
+    if (detectionEnabled) return;
     const pos = getRelativePosition(e);
     if (pos) {
       setIsDrawing(true);
@@ -109,52 +114,94 @@ export function LiveDetectionView() {
   }, [isDrawing, drawStart, getRelativePosition]);
 
   const handleMouseUp = useCallback(() => {
-    if (isDrawing && tempRegion && socket) {
+    if (isDrawing && tempRegion) {
       const width = tempRegion[2] - tempRegion[0];
       const height = tempRegion[3] - tempRegion[1];
       if (width > 0.05 && height > 0.05) {
         setSinkRegion(tempRegion);
-        socket.emit('set_sink_region', { sink_region: tempRegion });
+        setSinkRegionSocket(tempRegion);
       }
     }
     setIsDrawing(false);
     setDrawStart(null);
     setTempRegion(null);
-  }, [isDrawing, tempRegion, socket]);
+  }, [isDrawing, tempRegion]);
 
-  const handleStartCamera = () => {
-    if (socket) {
-      socket.emit('start_camera');
-    }
-  };
-
-  const handleStopCamera = () => {
-    if (socket) {
-      socket.emit('stop_camera');
-    }
-  };
-
-  const handleStartDetection = () => {
-    if (socket) {
-      if (!sinkRegion) {
-        setError('Please draw the sink region first');
-        return;
+  const startCamera = async () => {
+    if (cameraRunning) return;
+    try {
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      streamRef.current = mediaStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
       }
-      socket.emit('start_detection');
+      getSocket().emit('start_camera');
+      setCameraRunning(true);
+    } catch (err) {
+      console.error('Camera error:', err);
+      setError('Failed to access camera. Please allow webcam permissions.');
     }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraRunning(false);
+  };
+
+  const sendFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    getSocket().emit('client_frame', { image: dataUrl });
+  };
+
+  const startFrameLoop = () => {
+    if (frameTimer.current !== null) return;
+    frameTimer.current = window.setInterval(sendFrame, 200); // ~5 FPS
+  };
+
+  const stopFrameLoop = () => {
+    if (frameTimer.current !== null) {
+      window.clearInterval(frameTimer.current);
+      frameTimer.current = null;
+    }
+  };
+
+  const handleStartDetection = async () => {
+    if (!sinkRegion) {
+      setError('Please draw the sink region first');
+      return;
+    }
+    if (!cameraRunning) {
+      await startCamera();
+    }
+    emitStartDetection();
+    startFrameLoop();
+    setDetectionEnabled(true);
   };
 
   const handleStopDetection = () => {
-    if (socket) {
-      socket.emit('stop_detection');
-    }
+    stopFrameLoop();
+    emitStopDetection();
+    setDetectionEnabled(false);
   };
 
   const handleClearSinkRegion = () => {
-    if (socket) {
-      setSinkRegion(null);
-      socket.emit('set_sink_region', { sink_region: null });
-    }
+    setSinkRegion(null);
+    setSinkRegionSocket(null);
   };
 
   const handleSaveThreshold = async () => {
@@ -172,7 +219,6 @@ export function LiveDetectionView() {
     }
   };
 
-  // Only use displayRegion for the placeholder (backend draws on actual frames)
   const displayRegion = sinkRegion;
 
   const formatTime = (seconds: number) => {
@@ -207,27 +253,23 @@ export function LiveDetectionView() {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       >
-        {frameData?.image ? (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={cameraRunning ? 'detection-feed' : 'detection-feed hidden'}
+        />
+        <canvas ref={canvasRef} className="hidden" />
+        {frameData?.image && (
           <img
             src={frameData.image}
-            alt="Live camera feed"
-            className="detection-feed"
+            alt="Annotated feed"
+            className="detection-feed overlay"
             draggable={false}
           />
-        ) : (
-          <div className="video-placeholder">
-            {cameraRunning ? (
-              <p>Loading camera...</p>
-            ) : (
-              <>
-                <p>Camera not started</p>
-                <p className="hint">Click "Start Camera" to begin</p>
-              </>
-            )}
-          </div>
         )}
 
-        {/* Sink region overlay - only show when drawing (before camera has it) */}
         {displayRegion && !frameData && (
           <div
             className="sink-region-overlay"
@@ -242,7 +284,6 @@ export function LiveDetectionView() {
           </div>
         )}
 
-        {/* Show temporary drawing region while actively drawing */}
         {tempRegion && (
           <div
             className="sink-region-overlay drawing"
@@ -257,67 +298,41 @@ export function LiveDetectionView() {
           </div>
         )}
 
-        {/* Drawing hint */}
         {cameraRunning && !detectionEnabled && !sinkRegion && frameData && (
           <div className="draw-hint">
             Click and drag to draw sink area
           </div>
         )}
+
+        {!cameraRunning && (
+          <div className="video-placeholder">
+            <p>Camera not started</p>
+            <p className="hint">Click "Start Detection" to begin</p>
+          </div>
+        )}
       </div>
 
       <div className="detection-controls">
-        {!cameraRunning ? (
-          <button onClick={handleStartCamera} className="btn btn-primary" disabled={!connected}>
-            Start Camera
-          </button>
+        {!detectionEnabled ? (
+          <>
+            <button onClick={handleStartDetection} className="btn btn-success" disabled={!connected || !sinkRegion}>
+              Start Detection
+            </button>
+            <button onClick={handleClearSinkRegion} className="btn btn-secondary" disabled={!sinkRegion}>
+              Clear Sink Region
+            </button>
+            <button onClick={stopCamera} className="btn btn-danger" disabled={!cameraRunning}>
+              Stop Camera
+            </button>
+          </>
         ) : (
           <>
-            {!detectionEnabled ? (
-              <>
-                <button onClick={handleStartDetection} className="btn btn-success" disabled={!sinkRegion}>
-                  Start Detection
-                </button>
-                <button onClick={handleClearSinkRegion} className="btn btn-secondary" disabled={!sinkRegion}>
-                  Clear Sink Region
-                </button>
-                <button onClick={handleStopCamera} className="btn btn-danger">
-                  Stop Camera
-                </button>
-                <div className="threshold-control">
-                  <label htmlFor="violation-threshold">Violation time (minutes)</label>
-                  <div className="threshold-input-row">
-                    <input
-                      id="violation-threshold"
-                      type="number"
-                      min={1}
-                      step={0.1}
-                      value={violationThresholdInput}
-                      onChange={(e) => setViolationThresholdInput(Number(e.target.value))}
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={handleSaveThreshold}
-                      disabled={savingThreshold}
-                    >
-                      {savingThreshold ? 'Saving…' : 'Save'}
-                    </button>
-                  </div>
-                  <div className="threshold-hint">
-                    Currently {(violationThresholdSeconds / 60).toFixed(2)} min
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                <button onClick={handleStopDetection} className="btn btn-warning">
-                  Stop Detection
-                </button>
-                <button onClick={handleStopCamera} className="btn btn-danger">
-                  Stop Camera
-                </button>
-              </>
-            )}
+            <button onClick={handleStopDetection} className="btn btn-warning">
+              Stop Detection
+            </button>
+            <button onClick={stopCamera} className="btn btn-danger">
+              Stop Camera
+            </button>
           </>
         )}
       </div>
@@ -337,7 +352,6 @@ export function LiveDetectionView() {
         </div>
       )}
 
-      {/* Tracked objects detail list */}
       {frameData && detectionEnabled && frameData.tracked_objects && frameData.tracked_objects.length > 0 && (
         <div className="tracked-objects-panel">
           <h4>Tracked Objects in Sink</h4>
@@ -375,13 +389,36 @@ export function LiveDetectionView() {
       <div className="detection-instructions">
         <h4>How to use:</h4>
         <ol>
-          <li><strong>Start Camera</strong> - Begin the live video feed</li>
+          <li><strong>Start Detection</strong> - begins webcam capture in your browser and streams frames to backend</li>
           <li><strong>Draw Sink Region</strong> - Click and drag on the video to mark your sink</li>
-          <li><strong>Start Detection</strong> - Enable object tracking</li>
           <li>Objects in the sink longer than your set violation time trigger a violation alert.</li>
         </ol>
+      </div>
+
+      <div className="threshold-control">
+        <label htmlFor="violation-threshold">Violation time (minutes)</label>
+        <div className="threshold-input-row">
+          <input
+            id="violation-threshold"
+            type="number"
+            min={0.01}
+            step={0.1}
+            value={violationThresholdInput}
+            onChange={(e) => setViolationThresholdInput(Number(e.target.value))}
+          />
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={handleSaveThreshold}
+            disabled={savingThreshold}
+          >
+            {savingThreshold ? 'Saving…' : 'Save'}
+          </button>
+          <div className="threshold-hint">
+            Currently {(violationThresholdSeconds / 60).toFixed(2)} min
+          </div>
+        </div>
       </div>
     </div>
   );
 }
-

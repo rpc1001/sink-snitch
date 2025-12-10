@@ -121,27 +121,29 @@ export function ViolationsPanel({
     return 'Active';
   };
 
-  const getImageUrl = (filename?: string) => {
+  const getImageUrl = (filename?: string, url?: string | null) => {
+    if (url) return url;
     if (!filename) return null;
     return `${API_BASE}/images/${filename}`;
   };
 
-  const getClipUrl = (filename?: string) => {
+  const getClipUrl = (filename?: string, url?: string | null) => {
+    if (url) return url;
     if (!filename) return null;
     return `${API_BASE}/clips/${filename}`;
   };
 
   const renderSnapshot = (v: Violation) => {
     const entryImage = (v as any).entry_image as string | undefined;
-    if (!entryImage) {
+    const entryImageUrl = (v as any).entry_image_url as string | undefined;
+    const src = getImageUrl(entryImage, entryImageUrl);
+    if (!src) {
       return (
         <div className="violation-avatar placeholder">
           🧼
         </div>
       );
     }
-
-    const src = `${API_BASE}/images/${entryImage}`;
     return (
       <img
         src={src}
@@ -292,9 +294,9 @@ export function ViolationsPanel({
                       <div className="violation-expanded-media">
                         <div className="violation-image-container">
                           <h4>Entry (when first detected)</h4>
-                          {getImageUrl((v as any).entry_image) ? (
+                          {getImageUrl((v as any).entry_image, (v as any).entry_image_url) ? (
                             <img
-                              src={getImageUrl((v as any).entry_image)!}
+                              src={getImageUrl((v as any).entry_image, (v as any).entry_image_url)!}
                               alt="Entry snapshot"
                               className="violation-image"
                             />
@@ -304,17 +306,18 @@ export function ViolationsPanel({
                         </div>
                       </div>
 
-                      {getClipUrl((v as any).violation_clip) && (
+                      {getClipUrl((v as any).violation_clip, (v as any).violation_clip_url) && (
                         <div className="violation-video-container">
                           <h4>Violation Clip</h4>
                           <video
                             className="violation-video"
                             controls
                             preload="metadata"
-                            src={getClipUrl((v as any).violation_clip)!}
+                            src={getClipUrl((v as any).violation_clip, (v as any).violation_clip_url)!}
                             poster={
                               getImageUrl(
-                                (v as any).entry_image || ''
+                                (v as any).violation_image || (v as any).entry_image || '',
+                                (v as any).violation_image_url || (v as any).entry_image_url
                               ) || undefined
                             }
                           />

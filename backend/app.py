@@ -8,8 +8,10 @@ import json
 import os
 import time
 import base64
+import numpy as np
 import cv2
 import requests
+from google.cloud import storage
 
 app = Flask(__name__)
 CORS(app)
@@ -25,6 +27,8 @@ IMAGES_DIR = "violation_images"
 VIDEO_CLIPS_DIR = "violation_clips"
 NOTIFICATION_CONFIG_FILE = "notification_config.json"
 DEFAULT_PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:5001")
+GCS_BUCKET = os.environ.get("GCS_BUCKET")
+GCS_PUBLIC_BASE = os.environ.get("GCS_PUBLIC_BASE")  # optional, e.g., https://storage.googleapis.com/<bucket>
 PRE_ROLL_SECONDS = 5
 CLIP_FPS = 15
 MAX_CLIP_SECONDS = 12  # keep clips small for Discord attachment limits
@@ -39,13 +43,12 @@ EXIT_TIMEOUT = 1.0          # If an object vanishes (no detection), drop after 1
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(VIDEO_CLIPS_DIR, exist_ok=True)
 
-# Global state
+# Global state (single-session detection driven by client frames)
 sink_region = None  # (x1, y1, x2, y2) in percentages (0-1)
-camera_running = False
+camera_running = False  # kept for UI status compatibility
 detection_enabled = False
 model = None
 model_loading = False
-cap = None
 current_frame = None  # Store current frame for violation snapshots
 
 # Tracking state
@@ -74,13 +77,15 @@ def process_violation_queue():
                 track_id = violation.get("track_id")
 
                 # Save violation image
-                violation_image = save_frame_as_image(frame, f"violation_{track_id}", box=box, label=label)
+                violation_image, violation_image_url = save_frame_as_image(frame, f"violation_{track_id}", box=box, label=label)
 
                 # Finalize clip
-                violation_clip = finalize_clip(track_id)
+                violation_clip, violation_clip_url = finalize_clip(track_id)
 
                 violation["violation_image"] = violation_image
+                violation["violation_image_url"] = violation_image_url
                 violation["violation_clip"] = violation_clip
+                violation["violation_clip_url"] = violation_clip_url
 
                 # Log and emit
                 log_to_file(violation, VIOLATIONS_FILE)
@@ -198,22 +203,48 @@ def is_inside_sink(box, frame_shape):
     sy2 = sink_region[3] * h
     return bool(sx1 <= cx <= sx2 and sy1 <= cy <= sy2)
 
-def save_frame_as_image(frame, prefix, box=None, label=None):
-    """Save a frame as a JPEG image with optional bounding box and return the filename."""
-    if frame is None:
+def get_storage_client():
+    if not GCS_BUCKET:
         return None
+    try:
+        return storage.Client()
+    except Exception as e:
+        print(f"Failed to init GCS client: {e}")
+        return None
+
+
+def upload_media_bytes(content_bytes, filename, content_type, folder):
+    """
+    Upload bytes to GCS if configured, returning (filename, public_url or None).
+    """
+    client = get_storage_client()
+    if not client:
+        return filename, None
+    try:
+        bucket = client.bucket(GCS_BUCKET)
+        blob_path = f"{folder}/{filename}"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(content_bytes, content_type=content_type)
+        if GCS_PUBLIC_BASE:
+            return filename, f"{GCS_PUBLIC_BASE}/{blob_path}"
+        else:
+            return filename, blob.public_url
+    except Exception as e:
+        print(f"GCS upload failed for {filename}: {e}")
+        return filename, None
+
+
+def save_frame_as_image(frame, prefix, box=None, label=None):
+    """Save a frame as a JPEG image with optional bounding box and return filename and url."""
+    if frame is None:
+        return None, None
     
-    # Make a copy to draw on
     img = frame.copy()
     
-    # Draw bounding box if provided
     if box is not None:
         x1, y1, x2, y2 = box
-        # Draw thick red rectangle
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)
-        # Add label if provided
         if label:
-            # Draw label background
             (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             cv2.rectangle(img, (x1, y1 - text_height - 10), (x1 + text_width + 10, y1), (0, 0, 255), -1)
             cv2.putText(img, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -222,7 +253,10 @@ def save_frame_as_image(frame, prefix, box=None, label=None):
     filename = f"{prefix}_{timestamp}.jpg"
     filepath = os.path.join(IMAGES_DIR, filename)
     cv2.imwrite(filepath, img)
-    return filename
+    with open(filepath, "rb") as f:
+        content_bytes = f.read()
+    _, public_url = upload_media_bytes(content_bytes, filename, "image/jpeg", IMAGES_DIR)
+    return filename, public_url
 
 def frame_to_base64(frame):
     """Convert frame to base64 string."""
@@ -264,7 +298,7 @@ def finalize_clip(track_id):
 
     clip = active_clips.get(track_id, None)
     if not clip or not clip.get("frames"):
-        return None
+        return None, None
     frames = clip["frames"]
     # Limit clip length to avoid oversized attachments (Discord 8MB)
     max_frames = int(CLIP_FPS * MAX_CLIP_SECONDS)
@@ -300,7 +334,10 @@ def finalize_clip(track_id):
     for f in frames:
         writer.write(f)
     writer.release()
-    return filename
+    with open(filepath, "rb") as f:
+        content_bytes = f.read()
+    _, public_url = upload_media_bytes(content_bytes, filename, "video/mp4", VIDEO_CLIPS_DIR)
+    return filename, public_url
 
 def delete_clip(track_id):
     """ Delete any in-progress clip for a track that exited without violation. """
@@ -477,238 +514,187 @@ def load_yolo_model():
     finally:
         model_loading = False
 
-def run_camera_stream():
-    """Background thread that streams camera, optionally with YOLO detection."""
-    global camera_running, detection_enabled, model, tracked_objects, cap, current_frame
-    
-    try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            socketio.emit('error', {"message": "Failed to open camera"})
-            camera_running = False
-            return
-        
-        socketio.emit('status', {"message": "Camera started", "camera_running": True, "detection_enabled": False})
-        
-        while camera_running:
-            ret, frame = cap.read()
-            if not ret:
-                socketio.sleep(0.01)
-                continue
-            
-            detections = []
-            sink_time = 0
-            tracked_list = []
-            
-            # Store current frame for violation snapshots
-            current_frame = frame.copy()
-            update_video_buffer(current_frame)
-            
-            # Run YOLO detection if enabled and model is loaded
-            if detection_enabled and model is not None and sink_region is not None:
-                # Use custom ByteTrack config for better tracking stability
-                results = model.track(
-                    frame, 
-                    persist=True, 
-                    conf=0.3,  # Higher confidence threshold
-                    iou=0.5,   # NMS IoU threshold to reduce duplicates
-                    verbose=False, 
-                    tracker="custom_bytetrack.yaml"
-                )
-                current_time = time.time()
-                active_ids = set()
-                
-                if results[0].boxes is not None and results[0].boxes.id is not None:
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
-                    ids = results[0].boxes.id.cpu().numpy().astype(int)
-                    confs = results[0].boxes.conf.cpu().numpy()
-                    clss = results[0].boxes.cls.cpu().numpy().astype(int)
-                    
-                    for box, tid, conf, cls_id in zip(boxes, ids, confs, clss):
-                        cls_id_int = int(cls_id)
-                        class_name = model.names[cls_id_int]
-                        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-                        box_coords = (x1, y1, x2, y2)
-                        in_sink = bool(is_inside_sink(box, frame.shape))
-                        tid_int = int(tid)
-                        
-                        # Check if this track should be merged with an existing one
-                        effective_tid = tid_int
-                        if tid_int in track_id_mapping:
-                            # Already mapped, use the mapped ID silently
-                            effective_tid = track_id_mapping[tid_int]
-                        elif in_sink and tid_int not in tracked_objects:
-                            # Check if this new detection overlaps with existing tracked objects
-                            for existing_tid, existing_data in tracked_objects.items():
-                                if "box" in existing_data:
-                                    iou = calculate_iou(box_coords, existing_data["box"])
-                                    if iou > IOU_MERGE_THRESHOLD:
-                                        # This is likely the same object with a new ID
-                                        effective_tid = existing_tid
-                                        track_id_mapping[tid_int] = existing_tid
-                                        print(f"Merged track #{tid_int} -> #{existing_tid} (IoU={iou:.2f})")
-                                        break
-                        
-                        detections.append({
-                            "id": effective_tid,
+def process_frame_and_emit(frame, sid=None):
+    """Process an incoming client frame and emit annotated frame."""
+    global current_frame
+
+    if frame is None:
+        return
+
+    detections = []
+    sink_time = 0
+    tracked_list = []
+
+    current_frame = frame.copy()
+    update_video_buffer(current_frame)
+
+    if detection_enabled and model is not None and sink_region is not None:
+        results = model.track(
+            frame,
+            persist=True,
+            conf=0.3,
+            iou=0.5,
+            verbose=False,
+            tracker="custom_bytetrack.yaml"
+        )
+        current_time = time.time()
+        active_ids = set()
+
+        if results and results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            ids = results[0].boxes.id.cpu().numpy().astype(int)
+            confs = results[0].boxes.conf.cpu().numpy()
+            clss = results[0].boxes.cls.cpu().numpy().astype(int)
+
+            for box, tid, conf, cls_id in zip(boxes, ids, confs, clss):
+                cls_id_int = int(cls_id)
+                class_name = model.names[cls_id_int]
+                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                box_coords = (x1, y1, x2, y2)
+                in_sink = bool(is_inside_sink(box, frame.shape))
+                tid_int = int(tid)
+
+                effective_tid = tid_int
+                if tid_int in track_id_mapping:
+                    effective_tid = track_id_mapping[tid_int]
+                elif in_sink and tid_int not in tracked_objects:
+                    for existing_tid, existing_data in tracked_objects.items():
+                        if "box" in existing_data:
+                            iou = calculate_iou(box_coords, existing_data["box"])
+                            if iou > IOU_MERGE_THRESHOLD:
+                                effective_tid = existing_tid
+                                track_id_mapping[tid_int] = existing_tid
+                                print(f"Merged track #{tid_int} -> #{existing_tid} (IoU={iou:.2f})")
+                                break
+
+                detections.append({
+                    "id": effective_tid,
+                    "class": str(class_name),
+                    "confidence": float(conf),
+                    "box": [x1, y1, x2, y2],
+                    "in_sink": in_sink
+                })
+
+                if in_sink:
+                    active_ids.add(effective_tid)
+                    if not tracked_objects.get(effective_tid, {}).get("violation_logged"):
+                        start_clip_for_track(effective_tid)
+                        append_frame_to_clip(effective_tid, current_frame)
+
+                    if effective_tid not in tracked_objects:
+        entry_image, entry_image_url = save_frame_as_image(
+                            current_frame,
+                            f"entry_{effective_tid}",
+                            box=box_coords,
+                            label=f"#{effective_tid} {class_name}"
+                        )
+                        tracked_objects[effective_tid] = {
+                            "first_seen": current_time,
+                            "last_seen": current_time,
+                            "last_update": current_time,
+                            "total_in_sink_time": 0.0,
                             "class": str(class_name),
-                            "confidence": float(conf),
-                            "box": [x1, y1, x2, y2],
-                            "in_sink": in_sink
-                        })
-                        
-                        if in_sink:
-                            active_ids.add(effective_tid)
-                            if not tracked_objects.get(effective_tid, {}).get("violation_logged"):
-                                start_clip_for_track(effective_tid)
-                                append_frame_to_clip(effective_tid, current_frame)
-                                
-                            if effective_tid not in tracked_objects:
-                                # New object entering sink - save entry image with box
-                                entry_image = save_frame_as_image(
-                                    current_frame, 
-                                    f"entry_{effective_tid}",
-                                    box=box_coords,
-                                    label=f"#{effective_tid} {class_name}"
-                                )
-                                tracked_objects[effective_tid] = {
-                                    "first_seen": current_time,
-                                    "last_seen": current_time,
-                                    "last_update": current_time,
-                                    "total_in_sink_time": 0.0,
-                                    "class": str(class_name),
-                                    "violation_logged": False,
-                                    "entry_image": entry_image,
-                                    "box": box_coords,
-                                    "last_in_sink": True,
-                                    "currently_in_sink": True
-                                }
-                                print(f"New object #{effective_tid} ({class_name}) entered sink")
-                            else:
-                                data = tracked_objects[effective_tid]
-                                delta = current_time - data.get("last_update", current_time)
-                                if data.get("currently_in_sink", False):
-                                    data["total_in_sink_time"] = data.get("total_in_sink_time", 0.0) + delta
-                                data["last_seen"] = current_time
-                                data["last_update"] = current_time
-                                data["box"] = box_coords  # Update box position
-                                data["last_in_sink"] = True # Confirmed inside sink
-                                data["currently_in_sink"] = True
-                        else:
-                            # Detected but NOT in sink (e.g. removed or on counter)
-                            if effective_tid in tracked_objects:
-                                # Immediately drop tracking for objects that leave the sink
-                                delete_clip(effective_tid)
-                                del tracked_objects[effective_tid]
-                                for k, v in list(track_id_mapping.items()):
-                                    if v == effective_tid or k == effective_tid:
-                                        del track_id_mapping[k]
-                                print(f"Dropped object #{effective_tid} (left sink)")
-                        
-                        # Draw detection box with ID and time info
-                        color = (0, 0, 255) if in_sink else (0, 255, 0)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        
-                        # Show ID, class, and time in sink if applicable
-                        if in_sink and effective_tid in tracked_objects:
-                            obj_data = tracked_objects[effective_tid]
-                            base_time = obj_data.get("total_in_sink_time", 0.0)
-                            base_time += current_time - obj_data.get("last_update", current_time)
-                            time_in_sink = int(base_time)
-                            label = f"ID:{effective_tid} {class_name} ({time_in_sink}s)"
-                        else:
-                            label = f"ID:{effective_tid} {class_name}"
-                        
-                        cv2.putText(frame, label, (x1, y1 - 5), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                
-                # Cleanup old tracked objects (handling Occlusion)
-                for stored_tid in list(tracked_objects.keys()):
-                    if stored_tid not in active_ids:
-                        # Time since this object was last seen by the camera
-                        time_unseen = current_time - tracked_objects[stored_tid]["last_seen"]
-                        
-                        # If vanished completely, treat as exit after short grace
-                        was_in_sink = tracked_objects[stored_tid].get("currently_in_sink", tracked_objects[stored_tid].get("last_in_sink", False))
-                        timeout_limit = EXIT_TIMEOUT if was_in_sink else NORMAL_TIMEOUT
-                        
-                        if time_unseen > timeout_limit:
-                            del tracked_objects[stored_tid]
-                            # Also clean up any mappings to this track
-                            for k, v in list(track_id_mapping.items()):
-                                if v == stored_tid:
-                                    del track_id_mapping[k]
-                                if k == stored_tid:
-                                    del track_id_mapping[k]
-                            delete_clip(stored_tid)
-                            print(f"Dropped vanished object #{stored_tid} (Unseen {time_unseen:.2f}s, in_sink={was_in_sink})")
-                
-                check_violations()
-                
-                # Build list of tracked objects with their times
-                tracked_list = []
-                if tracked_objects:
-                    for tid, data in tracked_objects.items():
-                        if not data.get("currently_in_sink", False):
-                            continue
-                        base_time = data.get("total_in_sink_time", 0.0)
+                            "violation_logged": False,
+            "entry_image": entry_image,
+            "entry_image_url": entry_image_url,
+                            "box": box_coords,
+                            "last_in_sink": True,
+                            "currently_in_sink": True
+                        }
+                        print(f"New object #{effective_tid} ({class_name}) entered sink")
+                    else:
+                        data = tracked_objects[effective_tid]
+                        delta = current_time - data.get("last_update", current_time)
                         if data.get("currently_in_sink", False):
-                            base_time += current_time - data.get("last_update", current_time)
-                        obj_time = int(base_time)
-                        # Check if currently occluded
-                        is_occluded = (current_time - data["last_seen"]) > 1.0
-                        
-                        tracked_list.append({
-                            "id": int(tid),
-                            "class": str(data["class"]),
-                            "time_in_sink": obj_time,
-                            "violation_logged": bool(data.get("violation_logged", False)),
-                            "status": "occluded" if is_occluded else "visible"
-                        })
-                    if tracked_list:
-                        sink_time = max(obj["time_in_sink"] for obj in tracked_list)
-            
-            # Draw sink region (only from backend to avoid double-drawing)
-            if sink_region:
-                h, w = frame.shape[:2]
-                sx1, sy1 = int(sink_region[0] * w), int(sink_region[1] * h)
-                sx2, sy2 = int(sink_region[2] * w), int(sink_region[3] * h)
-                # Yellow when not detecting, green when detecting
-                color = (0, 255, 0) if detection_enabled else (0, 255, 255)
-                cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), color, 3)
-                label = "DETECTING" if detection_enabled else "SINK AREA"
-                cv2.putText(frame, label, (sx1 + 5, sy1 + 25), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            
-            # Encode and emit frame
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            frame_b64 = base64.b64encode(buffer).decode('utf-8')
-            
-            # Include tracked_list only when detection is enabled
-            tracked_info = tracked_list if detection_enabled else []
-            
-            socketio.emit('frame', {
-                "image": f"data:image/jpeg;base64,{frame_b64}",
-                "detections": detections,
-                "sink_time": int(sink_time),
-                "tracked_count": int(len(tracked_list)),
-                "detection_enabled": bool(detection_enabled),
-                "tracked_objects": tracked_info
-            })
-            
-            socketio.sleep(0.033)  # ~30 FPS
-        
-        cap.release()
-        cap = None
-        socketio.emit('status', {"message": "Camera stopped", "camera_running": False, "detection_enabled": False})
-        
-    except Exception as e:
-        print(f"Camera error: {e}")
-        socketio.emit('error', {"message": str(e)})
-        camera_running = False
-        if cap:
-            cap.release()
-            cap = None
+                            data["total_in_sink_time"] = data.get("total_in_sink_time", 0.0) + delta
+                        data["last_seen"] = current_time
+                        data["last_update"] = current_time
+                        data["box"] = box_coords
+                        data["last_in_sink"] = True
+                        data["currently_in_sink"] = True
+                else:
+                    if effective_tid in tracked_objects:
+                        delete_clip(effective_tid)
+                        del tracked_objects[effective_tid]
+                        for k, v in list(track_id_mapping.items()):
+                            if v == effective_tid or k == effective_tid:
+                                del track_id_mapping[k]
+                        print(f"Dropped object #{effective_tid} (left sink)")
+
+                color = (0, 0, 255) if in_sink else (0, 255, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+                if in_sink and effective_tid in tracked_objects:
+                    obj_data = tracked_objects[effective_tid]
+                    base_time = obj_data.get("total_in_sink_time", 0.0)
+                    base_time += current_time - obj_data.get("last_update", current_time)
+                    time_in_sink = int(base_time)
+                    label = f"ID:{effective_tid} {class_name} ({time_in_sink}s)"
+                else:
+                    label = f"ID:{effective_tid} {class_name}"
+
+                cv2.putText(frame, label, (x1, y1 - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        if detection_enabled:
+            for stored_tid in list(tracked_objects.keys()):
+                if stored_tid not in active_ids:
+                    time_unseen = current_time - tracked_objects[stored_tid]["last_seen"]
+                    was_in_sink = tracked_objects[stored_tid].get("currently_in_sink", tracked_objects[stored_tid].get("last_in_sink", False))
+                    timeout_limit = EXIT_TIMEOUT if was_in_sink else NORMAL_TIMEOUT
+                    if time_unseen > timeout_limit:
+                        del tracked_objects[stored_tid]
+                        for k, v in list(track_id_mapping.items()):
+                            if v == stored_tid or k == stored_tid:
+                                del track_id_mapping[k]
+                        delete_clip(stored_tid)
+                        print(f"Dropped vanished object #{stored_tid} (Unseen {time_unseen:.2f}s, in_sink={was_in_sink})")
+
+            check_violations()
+
+            if tracked_objects:
+                for tid, data in tracked_objects.items():
+                    if not data.get("currently_in_sink", False):
+                        continue
+                    base_time = data.get("total_in_sink_time", 0.0)
+                    if data.get("currently_in_sink", False):
+                        base_time += current_time - data.get("last_update", current_time)
+                    obj_time = int(base_time)
+                    is_occluded = (current_time - data["last_seen"]) > 1.0
+
+                    tracked_list.append({
+                        "id": int(tid),
+                        "class": str(data["class"]),
+                        "time_in_sink": obj_time,
+                        "violation_logged": bool(data.get("violation_logged", False)),
+                        "status": "occluded" if is_occluded else "visible"
+                    })
+                if tracked_list:
+                    sink_time = max(obj["time_in_sink"] for obj in tracked_list)
+
+    if sink_region:
+        h, w = frame.shape[:2]
+        sx1, sy1 = int(sink_region[0] * w), int(sink_region[1] * h)
+        sx2, sy2 = int(sink_region[2] * w), int(sink_region[3] * h)
+        color = (0, 255, 0) if detection_enabled else (0, 255, 255)
+        cv2.rectangle(frame, (sx1, sy1), (sx2, sy2), color, 3)
+        label = "DETECTING" if detection_enabled else "SINK AREA"
+        cv2.putText(frame, label, (sx1 + 5, sy1 + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    frame_b64 = base64.b64encode(buffer).decode('utf-8')
+
+    tracked_info = tracked_list if detection_enabled else []
+
+    socketio.emit('frame', {
+        "image": f"data:image/jpeg;base64,{frame_b64}",
+        "detections": detections,
+        "sink_time": int(sink_time),
+        "tracked_count": int(len(tracked_list) if tracked_list else 0),
+        "detection_enabled": bool(detection_enabled),
+        "tracked_objects": tracked_info
+    }, to=sid if sid else None)
 
 # ============== REST ENDPOINTS ==============
 @app.route("/log_usage", methods=["POST"])
@@ -880,6 +866,26 @@ def handle_connect():
     if sink_region:
         emit('sink_region', {"sink_region": sink_region})
 
+@socketio.on('client_frame')
+def handle_client_frame(data):
+    """Receive a frame from client (data URL or base64) and process."""
+    img_data = data.get("image")
+    if not img_data:
+        return
+    try:
+        # Strip data URL prefix if present
+        if "," in img_data:
+            img_data = img_data.split(",", 1)[1]
+        frame_bytes = base64.b64decode(img_data)
+        np_arr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return
+        process_frame_and_emit(frame, sid=request.sid)
+    except Exception as e:
+        print(f"Failed to process client frame: {e}")
+        emit('error', {"message": "Failed to process frame"})
+
 @socketio.on('start_camera')
 def handle_start_camera():
     global camera_running
@@ -887,8 +893,7 @@ def handle_start_camera():
         emit('status', {"message": "Camera already running", "camera_running": True, "detection_enabled": detection_enabled})
         return
     camera_running = True
-    socketio.start_background_task(run_camera_stream)
-    emit('status', {"message": "Starting camera...", "camera_running": True, "detection_enabled": False})
+    emit('status', {"message": "Camera ready (client capture)", "camera_running": True, "detection_enabled": detection_enabled})
 
 @socketio.on('stop_camera')
 def handle_stop_camera():
@@ -900,10 +905,6 @@ def handle_stop_camera():
 @socketio.on('start_detection')
 def handle_start_detection():
     global detection_enabled, model, tracked_objects, model_loading
-    
-    if not camera_running:
-        emit('error', {"message": "Start the camera first"})
-        return
     
     if sink_region is None:
         emit('error', {"message": "Please draw the sink region first"})
@@ -925,7 +926,9 @@ def handle_start_detection():
     
     # Model already loaded, start detection immediately
     tracked_objects = {}
+    track_id_mapping.clear()
     detection_enabled = True
+    camera_running = True
     emit('status', {"message": "Detection started", "camera_running": True, "detection_enabled": True})
 
 def load_model_and_start_detection():
@@ -980,5 +983,6 @@ load_notification_config()
 socketio.start_background_task(process_violation_queue)
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True, host='0.0.0.0', port=5001)
+    port = int(os.environ.get("PORT", 5001))
+    socketio.run(app, debug=True, host='0.0.0.0', port=port)
     
