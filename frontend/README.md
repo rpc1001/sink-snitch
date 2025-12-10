@@ -117,5 +117,5 @@ See [backend/README.md](../backend/README.md) for detailed API documentation.
 - Video clip recording with MediaRecorder API
 - Real-time dish tracking and detection
 - Facial recognition integration
-- Push notifications for dish violations
+- Push notifications for dish violations (now via optional Discord webhook in the Settings tab)
 

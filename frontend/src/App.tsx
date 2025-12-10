@@ -3,10 +3,11 @@ import { CapturePanel } from './components/CapturePanel';
 import { LogsTable } from './components/LogsTable';
 import { LiveDetectionView } from './components/LiveDetectionView';
 import { ViolationsPanel } from './components/ViolationsPanel';
+import { NotificationSettings } from './components/NotificationSettings';
 import { getSocket, disconnectSocket } from './lib/socket';
 import './styles.css';
 
-type Tab = 'live' | 'capture' | 'logs' | 'violations';
+type Tab = 'live' | 'capture' | 'logs' | 'violations' | 'settings';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('live');
@@ -46,6 +47,12 @@ function App() {
           >
             All Logs
           </button>
+          <button
+            className={`nav-button ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            Settings
+          </button>
         </nav>
       </header>
 
@@ -59,6 +66,7 @@ function App() {
         </div>
         {activeTab === 'capture' && <CapturePanel />}
         {activeTab === 'logs' && <LogsTable />}
+        {activeTab === 'settings' && <NotificationSettings />}
       </main>
     </div>
   );

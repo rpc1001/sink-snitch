@@ -8,6 +8,7 @@ import os
 import time
 import base64
 import cv2
+import requests
 
 app = Flask(__name__)
 CORS(app)
@@ -21,8 +22,12 @@ VIOLATIONS_FILE = "violations.jsonl"
 CONFIG_FILE = "sink_config.json"
 IMAGES_DIR = "violation_images"
 VIDEO_CLIPS_DIR = "violation_clips"
+NOTIFICATION_CONFIG_FILE = "notification_config.json"
+DEFAULT_PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:5001")
 PRE_ROLL_SECONDS = 5
 CLIP_FPS = 15
+MAX_CLIP_SECONDS = 12  # keep clips small for Discord attachment limits
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # Discord limit
 
 # Timeouts
 OCCLUSION_TIMEOUT = 120     # Keep "buried" objects in memory for 2 minutes
@@ -49,6 +54,7 @@ IOU_MERGE_THRESHOLD = 0.9  # If IoU > this, consider it the same object (very st
 video_buffer = deque(maxlen=int(PRE_ROLL_SECONDS * CLIP_FPS)) # Rolling buffer for video clips
 active_clips = {}
 last_buffer_time = 0.0
+notification_config = {"webhook_url": None}
 
 # ============== LOGGING ==============
 def log_to_file(entry, filepath=LOG_FILE):
@@ -81,6 +87,32 @@ def save_config():
     config = {"sink_region": sink_region}
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
+
+# ============== NOTIFICATION CONFIG ==============
+def is_valid_discord_webhook(url: str) -> bool:
+    if not isinstance(url, str):
+        return False
+    normalized = url.strip()
+    return normalized.startswith("https://discord.com/api/webhooks/") or normalized.startswith("https://discordapp.com/api/webhooks/")
+
+def load_notification_config():
+    global notification_config
+    if os.path.exists(NOTIFICATION_CONFIG_FILE):
+        try:
+            with open(NOTIFICATION_CONFIG_FILE, "r") as f:
+                content = f.read().strip()
+                if content:
+                    notification_config = json.loads(content)
+        except json.JSONDecodeError:
+            notification_config = {"webhook_url": None}
+    return notification_config
+
+def save_notification_config():
+    with open(NOTIFICATION_CONFIG_FILE, "w") as f:
+        json.dump(notification_config, f)
+
+def get_webhook_url():
+    return notification_config.get("webhook_url")
 
 # ============== DETECTION LOGIC ==============
 def calculate_iou(box1, box2):
@@ -187,6 +219,10 @@ def finalize_clip(track_id):
     if not clip or not clip.get("frames"):
         return None
     frames = clip["frames"]
+    # Limit clip length to avoid oversized attachments (Discord 8MB)
+    max_frames = int(CLIP_FPS * MAX_CLIP_SECONDS)
+    if len(frames) > max_frames:
+        frames = frames[-max_frames:]
     h, w = frames[0].shape[:2]
 
     # prefers H.264/avc1 for better browser compatibility but falls back to mp4v if unavailable
@@ -225,6 +261,102 @@ def delete_clip(track_id):
     if track_id in active_clips:
         del active_clips[track_id]
 
+# ============== NOTIFICATIONS ==============
+def build_violation_links(violation):
+    """Return (image_url, clip_url) for sharing externally."""
+    base_url = os.environ.get("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL)
+    image_url = None
+    clip_url = None
+    if violation.get("violation_image"):
+        image_url = f"{base_url}/images/{violation['violation_image']}"
+    if violation.get("violation_clip"):
+        clip_url = f"{base_url}/clips/{violation['violation_clip']}"
+    return image_url, clip_url
+
+def send_discord_notification(violation):
+    """Post a violation notification to Discord if a webhook is configured."""
+    webhook_url = get_webhook_url()
+    if not webhook_url:
+        return
+
+    image_url, clip_url = build_violation_links(violation)
+    content = f"Dish violation: {violation.get('class', 'unknown')} in sink for {violation.get('duration_seconds', 0)}s ({violation.get('status', 'unknown')})."
+
+    embed = {
+        "title": "Sink Snitch Violation",
+        "description": f"Object #{violation.get('track_id')} exceeded the allowed time in the sink.",
+        "fields": [
+            {"name": "Duration", "value": f"{violation.get('duration_seconds', 0)} seconds", "inline": True},
+            {"name": "Status", "value": violation.get("status", "unknown"), "inline": True},
+        ],
+    }
+
+    attachments = []
+    attachment_files = []
+
+    def attach_file(path, filename, mime):
+        if not os.path.exists(path):
+            return None
+        try:
+            size = os.path.getsize(path)
+            if size > MAX_ATTACHMENT_BYTES:
+                return None
+        except OSError:
+            return None
+        try:
+            f = open(path, "rb")
+            attachment_files.append(f)
+            idx = len(attachments)
+            attachments.append((f"files[{idx}]", (filename, f, mime)))
+            return f"attachment://{filename}"
+        except Exception:
+            return None
+
+    # Try to attach image
+    image_attachment_url = None
+    if violation.get("violation_image"):
+        img_path = os.path.join(IMAGES_DIR, violation["violation_image"])
+        image_attachment_url = attach_file(img_path, violation["violation_image"], "image/jpeg")
+
+    # Try to attach clip (ensure size/length constraints already enforced in finalize_clip)
+    clip_attachment_url = None
+    if violation.get("violation_clip"):
+        clip_path = os.path.join(VIDEO_CLIPS_DIR, violation["violation_clip"])
+        clip_attachment_url = attach_file(clip_path, violation["violation_clip"], "video/mp4")
+
+    # Prefer attachments; fall back to hosted URLs
+    final_image_url = image_attachment_url or image_url
+    final_clip_url = clip_attachment_url or clip_url
+
+    if final_image_url:
+        embed["image"] = {"url": final_image_url}
+    if final_clip_url:
+        # Only set embed URL for http(s) links (Discord rejects attachment:// here)
+        if final_clip_url.startswith("http"):
+            embed["url"] = final_clip_url
+        clip_label = final_clip_url if final_clip_url.startswith("http") else "Attached clip"
+        embed.setdefault("fields", []).append({"name": "Clip", "value": clip_label, "inline": False})
+
+    payload = {"content": content, "embeds": [embed]}
+
+    try:
+        if attachments:
+            data = {"payload_json": json.dumps(payload)}
+            resp = requests.post(webhook_url, data=data, files=attachments, timeout=10)
+        else:
+            resp = requests.post(webhook_url, json=payload, timeout=5)
+
+        if resp.status_code >= 300:
+            print(f"Discord webhook responded with {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"Discord webhook failed: {e}")
+    finally:
+        for f in attachment_files:
+            try:
+                f.close()
+            except Exception:
+                pass
+
 def check_violations():
     global current_frame
     current_time = time.time()
@@ -262,6 +394,8 @@ def check_violations():
             log_to_file(violation, VIOLATIONS_FILE)
             tracked_objects[track_id]["violation_logged"] = True
             socketio.emit('violation', violation)
+            # Send notification without blocking detection loop
+            socketio.start_background_task(send_discord_notification, violation)
             print(f"Violation logged: {violation}")
 
 def load_yolo_model():
@@ -543,6 +677,26 @@ def handle_sink_region():
     save_config()
     return jsonify({"status": "updated", "sink_region": sink_region}), 200
 
+@app.route("/notification/webhook", methods=["GET", "POST"])
+def notification_webhook():
+    if request.method == "GET":
+        return jsonify({"configured": bool(get_webhook_url())}), 200
+
+    data = request.get_json(silent=True) or {}
+    url = data.get("webhook_url")
+
+    if url is None or (isinstance(url, str) and not url.strip()):
+        notification_config["webhook_url"] = None
+        save_notification_config()
+        return jsonify({"status": "cleared", "configured": False}), 200
+
+    if not is_valid_discord_webhook(url):
+        return jsonify({"error": "Invalid webhook URL"}), 400
+
+    notification_config["webhook_url"] = url.strip()
+    save_notification_config()
+    return jsonify({"status": "saved", "configured": True}), 200
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -672,6 +826,7 @@ def handle_set_sink_region(data):
 
 # ============== STARTUP ==============
 load_config()
+load_notification_config()
 
 if __name__ == "__main__":
     socketio.run(app, debug=True, host='0.0.0.0', port=5001)

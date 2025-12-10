@@ -23,6 +23,10 @@ Thumbs.db
 # Log and data files
 usage_logs.jsonl
 *.log
+sink_config.json
+violation_clips/
+violation_images/
+
 
 # Environment variables
 .env

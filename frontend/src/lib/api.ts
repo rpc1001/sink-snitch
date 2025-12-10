@@ -1,9 +1,9 @@
-import type { 
-  LogUsageRequest, 
-  LogUsageResponse, 
+import type {
+  LogUsageRequest,
+  LogUsageResponse,
   GetLogsResponse,
   GetViolationsResponse,
-  SinkRegion 
+  SinkRegion
 } from '../types';
 
 // Use environment variable if set, otherwise fall back to proxy path
@@ -85,4 +85,31 @@ export async function getDetectionStatus(): Promise<{ running: boolean; tracked_
 
 export function getSocketUrl(): string {
   return API_BASE;
+}
+
+export async function getWebhookConfig(): Promise<{ configured: boolean }> {
+  const response = await fetch(`${API_BASE}/notification/webhook`);
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function saveWebhookUrl(webhookUrl: string | null): Promise<{ status: string; configured: boolean }> {
+  const response = await fetch(`${API_BASE}/notification/webhook`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ webhook_url: webhookUrl }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+
+  return response.json();
 }

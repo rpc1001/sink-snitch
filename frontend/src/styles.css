@@ -815,3 +815,43 @@ tbody tr:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* Settings */
+.settings-panel h2 {
+  margin-bottom: 0.5rem;
+  color: #2c3e50;
+}
+
+.settings-subtitle {
+  margin-bottom: 1rem;
+  color: #555;
+}
+
+.settings-card {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.settings-form .form-hint {
+  display: block;
+  margin-top: 0.35rem;
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.configured-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #2c3e50;
+  font-weight: 500;
+}

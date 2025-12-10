@@ -6,3 +6,4 @@ eventlet==0.35.2
 ultralytics>=8.0.0
 opencv-python>=4.6.0
 numpy>=1.23.0
+requests>=2.31.0
