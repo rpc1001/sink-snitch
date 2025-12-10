@@ -23,8 +23,9 @@ export function LiveDetectionView() {
 
   // Initialize socket
   useEffect(() => {
+    // Force polling to avoid websocket transport errors when server runs in threading mode
     const newSocket = io(getSocketUrl(), {
-      transports: ['websocket', 'polling'],
+      transports: ['polling'],
     });
 
     newSocket.on('connect', () => {

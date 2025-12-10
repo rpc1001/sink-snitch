@@ -33,7 +33,7 @@ MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # Discord limit
 # Timeouts
 OCCLUSION_TIMEOUT = 120     # Keep "buried" objects in memory for 2 minutes
 NORMAL_TIMEOUT = 5          # Forget objects outside the sink quickly (5 seconds)
-EXIT_TIMEOUT = 1.0          # If an object vanishes (no detection), drop after 1s
+EXIT_TIMEOUT = 5.0          # If an object vanishes (no detection), drop after 5s
 
 # Create images directory
 os.makedirs(IMAGES_DIR, exist_ok=True)
