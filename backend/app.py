@@ -49,7 +49,7 @@ current_frame = None  # Store current frame for violation snapshots
 # Tracking state
 tracked_objects = {}  # {track_id: {first_seen, last_seen, class, violation_logged, entry_image, box, last_in_sink}}
 track_id_mapping = {}  # Maps new track IDs to existing ones if they overlap
-VIOLATION_THRESHOLD = 20  # 20 seconds for testing (change to 30 * 60 for production)
+VIOLATION_THRESHOLD = 30 * 60  # default 30 minutes
 IOU_MERGE_THRESHOLD = 0.9  # If IoU > this, consider it the same object (very strict)
 video_buffer = deque(maxlen=int(PRE_ROLL_SECONDS * CLIP_FPS)) # Rolling buffer for video clips
 active_clips = {}
@@ -69,7 +69,7 @@ def read_logs(filepath=LOG_FILE):
 
 # ============== CONFIG MANAGEMENT ==============
 def load_config():
-    global sink_region
+    global sink_region, VIOLATION_THRESHOLD
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -78,13 +78,20 @@ def load_config():
                     return sink_region
                 config = json.loads(content)
                 sink_region = config.get("sink_region")
+                if "violation_threshold" in config:
+                    try:
+                        vt = int(config.get("violation_threshold"))
+                        if vt > 0:
+                            VIOLATION_THRESHOLD = vt
+                    except Exception:
+                        pass
         except json.JSONDecodeError:
             # Ignore malformed/empty config and keep default sink_region
             sink_region = None
     return sink_region
 
 def save_config():
-    config = {"sink_region": sink_region}
+    config = {"sink_region": sink_region, "violation_threshold": VIOLATION_THRESHOLD}
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
 
@@ -658,6 +665,27 @@ def get_logs():
 def get_violations():
     violations = read_logs(VIOLATIONS_FILE)
     return jsonify({"count": len(violations), "records": violations}), 200
+
+@app.route("/violation_threshold", methods=["GET", "POST"])
+def handle_violation_threshold():
+    global VIOLATION_THRESHOLD
+    if request.method == "GET":
+        return jsonify({"violation_threshold_seconds": int(VIOLATION_THRESHOLD)}), 200
+    
+    data = request.get_json(silent=True) or {}
+    value = data.get("violation_threshold_seconds")
+    try:
+        value_int = int(value)
+    except Exception:
+        return jsonify({"error": "Invalid violation_threshold_seconds"}), 400
+    if value_int <= 0 or value_int > 86400:
+        return jsonify({"error": "violation_threshold_seconds must be between 1 and 86400"}), 400
+
+    VIOLATION_THRESHOLD = value_int
+    save_config()
+    # Broadcast to listeners if desired
+    socketio.emit("violation_threshold", {"violation_threshold_seconds": VIOLATION_THRESHOLD})
+    return jsonify({"status": "updated", "violation_threshold_seconds": VIOLATION_THRESHOLD}), 200
 
 @app.route("/violations/<violation_id>", methods=["DELETE"])
 def delete_violation(violation_id):
