@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CameraView } from './CameraView';
 import { logUsage } from '../lib/api';
-import type { LogUsageRequest } from '../types';
+import type { LogUsageRequest, Violation } from '../types';
 
 const TABLEWARE_OPTIONS = [
   'Bowl',
@@ -18,13 +18,21 @@ const TABLEWARE_OPTIONS = [
   'Wok',
 ];
 
-export function CapturePanel() {
+interface CapturePanelProps {
+  // Called when a manual log successfully creates a violation (frontend-side)
+  onNewViolation?: (v: Violation) => void;
+}
+
+export function CapturePanel({ onNewViolation }: CapturePanelProps) {
   const [name, setName] = useState('');
   const [tableware, setTableware] = useState('');
   const [action, setAction] = useState<'enter' | 'exit'>('enter');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitStatus, setSubmitStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [submitStatus, setSubmitStatus] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const handleCapture = (imageData: string) => {
     setCapturedImage(imageData);
@@ -33,7 +41,7 @@ export function CapturePanel() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!capturedImage) {
       setSubmitStatus({ type: 'error', message: 'Please capture an image first' });
       return;
@@ -55,9 +63,26 @@ export function CapturePanel() {
         action,
       };
 
+      // Tell the backend about the manual log
       await logUsage(request);
+
+      // Locally create a Violation object so the UI can show it immediately
+      if (onNewViolation) {
+        const manualViolation = {
+          id: `manual-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          class: tableware,             // treat tableware as the "class"
+          duration_seconds: 0,          // manual logs can start at 0
+          entry_image: capturedImage,
+          violation_image: capturedImage,
+          // other fields (track_id, violation_clip, etc.) can be omitted
+        } as Violation;
+
+        onNewViolation(manualViolation);
+      }
+
       setSubmitStatus({ type: 'success', message: 'Successfully logged!' });
-      
+
       // Clear form
       setName('');
       setTableware('');
@@ -66,7 +91,10 @@ export function CapturePanel() {
     } catch (error) {
       setSubmitStatus({
         type: 'error',
-        message: error instanceof Error ? error.message : 'Failed to submit log entry'
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Failed to submit log entry',
       });
     } finally {
       setIsSubmitting(false);
@@ -76,14 +104,18 @@ export function CapturePanel() {
   return (
     <div className="capture-panel">
       <h2>Log Dish Usage</h2>
-      
+
       <div className="capture-section">
         <CameraView onCapture={handleCapture} />
-        
+
         {capturedImage && (
           <div className="image-preview">
             <p>Captured Image:</p>
-            <img src={capturedImage} alt="Captured snapshot" className="preview-image" />
+            <img
+              src={capturedImage}
+              alt="Captured snapshot"
+              className="preview-image"
+            />
           </div>
         )}
       </div>
@@ -110,8 +142,10 @@ export function CapturePanel() {
             required
           >
             <option value="">Select tableware</option>
-            {TABLEWARE_OPTIONS.map(option => (
-              <option key={option} value={option}>{option}</option>
+            {TABLEWARE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
             ))}
           </select>
         </div>
@@ -146,4 +180,3 @@ export function CapturePanel() {
     </div>
   );
 }
-

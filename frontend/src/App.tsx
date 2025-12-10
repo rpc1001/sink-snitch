@@ -6,10 +6,15 @@ import { ViolationsPanel } from './components/ViolationsPanel';
 import { getSocket, disconnectSocket } from './lib/socket';
 import './styles.css';
 
-type Tab = 'live' | 'capture' | 'logs' | 'violations';
+import type { Violation } from './types';
+
+type Tab = 'live' | 'capture' | 'logs';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('live');
+
+  // 🔥 Shared violation list for EVERY page
+  const [violations, setViolations] = useState<Violation[]>([]);
 
   // Initialize socket connection on mount
   useEffect(() => {
@@ -19,29 +24,47 @@ function App() {
 
   return (
     <div className="app">
+      {/* ---------------- TOP HEADER / NAV ---------------- */}
       <header className="app-header">
-        <h1>Sink Snitch</h1>
-        <nav className="app-nav">
+        <div className="app-header-top">
+          <div className="app-brand">
+            <div className="app-logo-icon">
+              <span>💧</span>
+            </div>
+            <div className="app-brand-text">
+              <h1 className="app-title">SinkSnitch</h1>
+              <p className="app-subtitle">
+                Keeping your kitchen accountable, one dish at a time
+              </p>
+            </div>
+          </div>
+
           <button
-            className={`nav-button ${activeTab === 'live' ? 'active' : ''}`}
+            className="refresh-button"
+            onClick={() => window.location.reload()}
+          >
+            ⟳ Refresh
+          </button>
+        </div>
+
+        {/* ---------------- TAB NAVIGATION ---------------- */}
+        <nav className="app-tabs">
+          <button
+            className={`tab-button ${activeTab === 'live' ? 'active' : ''}`}
             onClick={() => setActiveTab('live')}
           >
             Live Detection
           </button>
+
           <button
-            className={`nav-button ${activeTab === 'violations' ? 'active' : ''}`}
-            onClick={() => setActiveTab('violations')}
-          >
-            Violations
-          </button>
-          <button
-            className={`nav-button ${activeTab === 'capture' ? 'active' : ''}`}
+            className={`tab-button ${activeTab === 'capture' ? 'active' : ''}`}
             onClick={() => setActiveTab('capture')}
           >
             Manual Log
           </button>
+
           <button
-            className={`nav-button ${activeTab === 'logs' ? 'active' : ''}`}
+            className={`tab-button ${activeTab === 'logs' ? 'active' : ''}`}
             onClick={() => setActiveTab('logs')}
           >
             All Logs
@@ -49,15 +72,36 @@ function App() {
         </nav>
       </header>
 
+      {/* ---------------- PAGE CONTENT ---------------- */}
       <main className="app-main">
-        {/* Keep LiveDetectionView mounted but hidden to maintain camera/tracking state */}
-        <div style={{ display: activeTab === 'live' ? 'block' : 'none' }}>
-          <LiveDetectionView />
-        </div>
-        <div style={{ display: activeTab === 'violations' ? 'block' : 'none' }}>
-          <ViolationsPanel />
-        </div>
-        {activeTab === 'capture' && <CapturePanel />}
+
+        {/* ========== LIVE DETECTION PAGE (2 columns) ========== */}
+        {activeTab === 'live' && (
+          <div className="app-two-column">
+            <section className="app-column app-column-left">
+              <LiveDetectionView />
+            </section>
+
+            <section className="app-column app-column-right">
+              {/* Pass shared violation list */}
+              <ViolationsPanel
+                violations={violations}
+                setViolations={setViolations}
+              />
+            </section>
+          </div>
+        )}
+
+        {/* ========== MANUAL LOG PAGE ========== */}
+        {activeTab === 'capture' && (
+          <CapturePanel
+            onNewViolation={(v: Violation) =>
+              setViolations(prev => [v, ...prev])
+            }
+          />
+        )}
+
+        {/* ========== ALL LOGS PAGE ========== */}
         {activeTab === 'logs' && <LogsTable />}
       </main>
     </div>
