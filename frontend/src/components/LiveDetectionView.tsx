@@ -67,7 +67,7 @@ export function LiveDetectionView() {
       .then(data => {
         if (typeof data.violation_threshold_seconds === 'number') {
           setViolationThresholdSeconds(data.violation_threshold_seconds);
-          setViolationThresholdInput(Math.round(data.violation_threshold_seconds / 60));
+          setViolationThresholdInput(data.violation_threshold_seconds / 60);
         }
       })
       .catch(err => console.error('Failed to load violation threshold:', err));
@@ -158,13 +158,13 @@ export function LiveDetectionView() {
   };
 
   const handleSaveThreshold = async () => {
-    const minutes = Math.max(1, violationThresholdInput);
+    const minutes = Math.max(0.01, violationThresholdInput);
     const seconds = minutes * 60;
     setSavingThreshold(true);
     try {
       const resp = await setViolationThreshold(seconds);
       setViolationThresholdSeconds(resp.violation_threshold_seconds);
-      setStatusMessage(`Violation time set to ${Math.round(resp.violation_threshold_seconds / 60)} minutes`);
+      setStatusMessage(`Violation time set to ${(resp.violation_threshold_seconds / 60).toFixed(2)} minutes`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save violation time');
     } finally {
@@ -290,7 +290,7 @@ export function LiveDetectionView() {
                       id="violation-threshold"
                       type="number"
                       min={1}
-                      step={1}
+                      step={0.1}
                       value={violationThresholdInput}
                       onChange={(e) => setViolationThresholdInput(Number(e.target.value))}
                     />
@@ -304,7 +304,7 @@ export function LiveDetectionView() {
                     </button>
                   </div>
                   <div className="threshold-hint">
-                    Currently {Math.round(violationThresholdSeconds / 60)} min
+                    Currently {(violationThresholdSeconds / 60).toFixed(2)} min
                   </div>
                 </div>
               </>

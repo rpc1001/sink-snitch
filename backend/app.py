@@ -33,6 +33,7 @@ MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # Discord limit
 # Timeouts
 OCCLUSION_TIMEOUT = 120     # Keep "buried" objects in memory for 2 minutes
 NORMAL_TIMEOUT = 5          # Forget objects outside the sink quickly (5 seconds)
+EXIT_TIMEOUT = 1.0          # If an object vanishes (no detection), drop after 1s
 
 # Create images directory
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -407,11 +408,18 @@ def check_violations():
     global current_frame
     current_time = time.time()
     for track_id, data in list(tracked_objects.items()):
-        duration = current_time - data["first_seen"]
+        base_time = data.get("total_in_sink_time", 0.0)
+        if data.get("currently_in_sink", False):
+            base_time += current_time - data.get("last_update", current_time)
+        duration = base_time
         
         # Determine if the object is currently visible or occluded (hidden)
         time_since_last_seen = current_time - data["last_seen"]
         is_occluded = time_since_last_seen > 2.0 # If not seen for 2s, assume occluded
+
+        # Do not log violations for objects that are no longer in the sink
+        if not data.get("currently_in_sink", False):
+            continue
 
         if duration > VIOLATION_THRESHOLD and not data.get("violation_logged"):
             # Update label to indicate if it's buried
@@ -566,23 +574,36 @@ def run_camera_stream():
                                 tracked_objects[effective_tid] = {
                                     "first_seen": current_time,
                                     "last_seen": current_time,
+                                    "last_update": current_time,
+                                    "total_in_sink_time": 0.0,
                                     "class": str(class_name),
                                     "violation_logged": False,
                                     "entry_image": entry_image,
                                     "box": box_coords,
-                                    "last_in_sink": True
+                                    "last_in_sink": True,
+                                    "currently_in_sink": True
                                 }
                                 print(f"New object #{effective_tid} ({class_name}) entered sink")
                             else:
-                                tracked_objects[effective_tid]["last_seen"] = current_time
-                                tracked_objects[effective_tid]["box"] = box_coords  # Update box position
-                                tracked_objects[effective_tid]["last_in_sink"] = True # Confirmed inside sink
+                                data = tracked_objects[effective_tid]
+                                delta = current_time - data.get("last_update", current_time)
+                                if data.get("currently_in_sink", False):
+                                    data["total_in_sink_time"] = data.get("total_in_sink_time", 0.0) + delta
+                                data["last_seen"] = current_time
+                                data["last_update"] = current_time
+                                data["box"] = box_coords  # Update box position
+                                data["last_in_sink"] = True # Confirmed inside sink
+                                data["currently_in_sink"] = True
                         else:
                             # Detected but NOT in sink (e.g. removed or on counter)
                             if effective_tid in tracked_objects:
-                                tracked_objects[effective_tid]["last_seen"] = current_time
-                                tracked_objects[effective_tid]["box"] = box_coords
-                                tracked_objects[effective_tid]["last_in_sink"] = False # Confirmed outside sink
+                                # Immediately drop tracking for objects that leave the sink
+                                delete_clip(effective_tid)
+                                del tracked_objects[effective_tid]
+                                for k, v in list(track_id_mapping.items()):
+                                    if v == effective_tid or k == effective_tid:
+                                        del track_id_mapping[k]
+                                print(f"Dropped object #{effective_tid} (left sink)")
                         
                         # Draw detection box with ID and time info
                         color = (0, 0, 255) if in_sink else (0, 255, 0)
@@ -590,7 +611,10 @@ def run_camera_stream():
                         
                         # Show ID, class, and time in sink if applicable
                         if in_sink and effective_tid in tracked_objects:
-                            time_in_sink = int(current_time - tracked_objects[effective_tid]["first_seen"])
+                            obj_data = tracked_objects[effective_tid]
+                            base_time = obj_data.get("total_in_sink_time", 0.0)
+                            base_time += current_time - obj_data.get("last_update", current_time)
+                            time_in_sink = int(base_time)
                             label = f"ID:{effective_tid} {class_name} ({time_in_sink}s)"
                         else:
                             label = f"ID:{effective_tid} {class_name}"
@@ -604,10 +628,9 @@ def run_camera_stream():
                         # Time since this object was last seen by the camera
                         time_unseen = current_time - tracked_objects[stored_tid]["last_seen"]
                         
-                        # If last seen in sink assume occluded, keep in memory for OCCLUSION_TIMEOUT
-                        # if last seen outside the sink, forget it quickly
-                        was_in_sink = tracked_objects[stored_tid].get("last_in_sink", False)
-                        timeout_limit = OCCLUSION_TIMEOUT if was_in_sink else NORMAL_TIMEOUT
+                        # If vanished completely, treat as exit after short grace
+                        was_in_sink = tracked_objects[stored_tid].get("currently_in_sink", tracked_objects[stored_tid].get("last_in_sink", False))
+                        timeout_limit = EXIT_TIMEOUT if was_in_sink else NORMAL_TIMEOUT
                         
                         if time_unseen > timeout_limit:
                             del tracked_objects[stored_tid]
@@ -615,8 +638,10 @@ def run_camera_stream():
                             for k, v in list(track_id_mapping.items()):
                                 if v == stored_tid:
                                     del track_id_mapping[k]
+                                if k == stored_tid:
+                                    del track_id_mapping[k]
                             delete_clip(stored_tid)
-                            print(f"Forgot object #{stored_tid} (Unseen for {int(time_unseen)}s, in_sink={was_in_sink})")
+                            print(f"Dropped vanished object #{stored_tid} (Unseen {time_unseen:.2f}s, in_sink={was_in_sink})")
                 
                 check_violations()
                 
@@ -624,7 +649,12 @@ def run_camera_stream():
                 tracked_list = []
                 if tracked_objects:
                     for tid, data in tracked_objects.items():
-                        obj_time = int(current_time - data["first_seen"])
+                        if not data.get("currently_in_sink", False):
+                            continue
+                        base_time = data.get("total_in_sink_time", 0.0)
+                        if data.get("currently_in_sink", False):
+                            base_time += current_time - data.get("last_update", current_time)
+                        obj_time = int(base_time)
                         # Check if currently occluded
                         is_occluded = (current_time - data["last_seen"]) > 1.0
                         
@@ -635,8 +665,8 @@ def run_camera_stream():
                             "violation_logged": bool(data.get("violation_logged", False)),
                             "status": "occluded" if is_occluded else "visible"
                         })
-                    oldest = min(data["first_seen"] for data in tracked_objects.values())
-                    sink_time = int(current_time - oldest)
+                    if tracked_list:
+                        sink_time = max(obj["time_in_sink"] for obj in tracked_list)
             
             # Draw sink region (only from backend to avoid double-drawing)
             if sink_region:
@@ -661,7 +691,7 @@ def run_camera_stream():
                 "image": f"data:image/jpeg;base64,{frame_b64}",
                 "detections": detections,
                 "sink_time": int(sink_time),
-                "tracked_count": int(len(tracked_objects)),
+                "tracked_count": int(len(tracked_list)),
                 "detection_enabled": bool(detection_enabled),
                 "tracked_objects": tracked_info
             })
@@ -713,18 +743,18 @@ def get_violations():
 def handle_violation_threshold():
     global VIOLATION_THRESHOLD
     if request.method == "GET":
-        return jsonify({"violation_threshold_seconds": int(VIOLATION_THRESHOLD)}), 200
+        return jsonify({"violation_threshold_seconds": float(VIOLATION_THRESHOLD)}), 200
     
     data = request.get_json(silent=True) or {}
     value = data.get("violation_threshold_seconds")
     try:
-        value_int = int(value)
+        value_float = float(value)
     except Exception:
         return jsonify({"error": "Invalid violation_threshold_seconds"}), 400
-    if value_int <= 0 or value_int > 86400:
+    if value_float <= 0 or value_float > 86400:
         return jsonify({"error": "violation_threshold_seconds must be between 1 and 86400"}), 400
 
-    VIOLATION_THRESHOLD = value_int
+    VIOLATION_THRESHOLD = float(value_float)
     save_config()
     # Broadcast to listeners if desired
     socketio.emit("violation_threshold", {"violation_threshold_seconds": VIOLATION_THRESHOLD})
@@ -763,6 +793,18 @@ def clear_violations():
             open(VIOLATIONS_FILE, "w").close()
         except Exception as e:
             return jsonify({"error": f"Failed to clear violations: {e}"}), 500
+
+    # Clear media files (keep directories)
+    for folder in (VIDEO_CLIPS_DIR, IMAGES_DIR):
+        if os.path.exists(folder):
+            for name in os.listdir(folder):
+                path = os.path.join(folder, name)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except Exception as e:
+                    return jsonify({"error": f"Failed to clear media: {e}"}), 500
+
     socketio.emit("violations_cleared")
     return jsonify({"status": "cleared"}), 200
 
