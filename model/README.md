@@ -36,4 +36,3 @@ After running all cells, the following are generated:
 - pandas
 
 Install with: `pip install ultralytics roboflow torch matplotlib opencv-python pandas`
-

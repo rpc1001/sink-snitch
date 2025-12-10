@@ -16,21 +16,13 @@ env/
 *.ipynb_checkpoints
 
 # Model weights (large files)
-*.pt
 *.pth
 *.onnx
 *.torchscript
 
-# Dataset folders (large)
+# Training folders
 combined_dishes/
-*Dirty-Kitchen*/
-*dishes-finder*/
-*my-first-project*/
-
-# Training outputs
 training/
-results/
-runs/
 
 # OS
 .DS_Store
@@ -46,6 +38,4 @@ Thumbs.db
 
 # Temporary files
 *.tmp
-*.log
 live_test_frames/
-
