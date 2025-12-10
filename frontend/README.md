@@ -14,7 +14,7 @@ Frontend application for Sink Snitch - an AI-powered system for detecting dish n
 
 - Node.js (v18 or higher recommended)
 - npm or yarn
-- Backend server running on `http://localhost:5000` (see [backend/README.md](../backend/README.md))
+- Backend server running on `http://localhost:5001` (see [backend/README.md](../backend/README.md))
 
 ### Installation
 
@@ -30,11 +30,11 @@ npm install
 
 ### Configuration
 
-The frontend uses a Vite proxy to communicate with the backend API. The proxy is configured in `vite.config.ts` to forward `/api/*` requests to `http://localhost:5000`.
+The frontend uses a Vite proxy to communicate with the backend API. The proxy is configured in `vite.config.ts` to forward `/api/*` requests to `http://localhost:5001`.
 
 If you need to change the backend URL, you can:
-- Modify the `target` in `vite.config.ts` server.proxy configuration
-- Or use environment variables (see `.env.example`)
+- Modify the `target` in `vite.config.ts` server.proxy configuration (defaults to `http://localhost:5001`)
+- Or use environment variables (see `.env.example` with `VITE_API_BASE_URL`)
 
 ## Running
 
@@ -101,6 +101,7 @@ The frontend communicates with the backend API through the following endpoints:
 
 - `POST /api/log_usage` - Submit a new log entry
 - `GET /api/get_logs` - Retrieve all log entries
+- violation clips/images are served from /clips/<filename> and /images/<filename> on port 5001
 
 See [backend/README.md](../backend/README.md) for detailed API documentation.
 

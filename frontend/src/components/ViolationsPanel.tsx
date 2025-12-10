@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import ReactPlayer from 'react-player';
 import { getViolations, API_BASE } from '../lib/api';
 import { onViolation } from '../lib/socket';
 import type { Violation } from '../types';
@@ -180,6 +179,18 @@ export function ViolationsPanel() {
                     {violation.violation_clip && (
                       <div className="violation-video-container">
                         <h4>Violation Clip</h4>
+                        <video
+                          className="violation-video"
+                          controls
+                          preload="metadata"
+                          src={getClipUrl(violation.violation_clip)!}
+                          poster={
+                            getImageUrl(violation.violation_image || violation.entry_image || '') || undefined
+                          }
+                        >
+                          Your browser does not support the video tag. Please use the download button below.
+                        </video>
+                        <p className="video-hint">If playback is choppy, use the download button.</p>
                         <button
                           className="btn btn-secondary btn-sm"
                           onClick={() => handleDownload(getClipUrl(violation.violation_clip)!, id)}
@@ -190,13 +201,6 @@ export function ViolationsPanel() {
                         {downloadStatus[id] && downloadStatus[id] !== 'downloading' && (
                           <p className="hint">{downloadStatus[id]}</p>
                         )}
-
-                        {/* <h4>OK Garmin</h4>
-                        <video 
-                          className="violation-video"
-                          controls 
-                          src={getClipUrl(violation.violation_clip)!}
-                        /> */}
                       </div>
                     )}
                     <div className="violation-extra-info">

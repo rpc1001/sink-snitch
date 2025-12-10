@@ -40,7 +40,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-API will be at url http://localhost:5000
+API will be at url http://localhost:5001
 
 
 ## Endpoints

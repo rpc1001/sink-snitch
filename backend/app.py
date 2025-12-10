@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 import json
 import os
@@ -11,7 +11,9 @@ import cv2
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# I switched to threading async mode bcuz I ran into eventlet compatibility issues on newer Python
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # ============== CONFIG ==============
 LOG_FILE = "usage_logs.jsonl"
@@ -63,9 +65,16 @@ def read_logs(filepath=LOG_FILE):
 def load_config():
     global sink_region
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-            sink_region = config.get("sink_region")
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                content = f.read().strip()
+                if not content:
+                    return sink_region
+                config = json.loads(content)
+                sink_region = config.get("sink_region")
+        except json.JSONDecodeError:
+            # Ignore malformed/empty config and keep default sink_region
+            sink_region = None
     return sink_region
 
 def save_config():
@@ -130,7 +139,7 @@ def save_frame_as_image(frame, prefix, box=None, label=None):
             cv2.rectangle(img, (x1, y1 - text_height - 10), (x1 + text_width + 10, y1), (0, 0, 255), -1)
             cv2.putText(img, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     filename = f"{prefix}_{timestamp}.jpg"
     filepath = os.path.join(IMAGES_DIR, filename)
     cv2.imwrite(filepath, img)
@@ -179,8 +188,29 @@ def finalize_clip(track_id):
         return None
     frames = clip["frames"]
     h, w = frames[0].shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+
+    # prefers H.264/avc1 for better browser compatibility but falls back to mp4v if unavailable
+    fourcc_candidates = ['avc1', 'H264', 'mp4v']
+    writer = None
+    probe_path = os.path.join(VIDEO_CLIPS_DIR, ".codec_probe.mp4")
+    for codec in fourcc_candidates:
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            writer = cv2.VideoWriter(probe_path, fourcc, CLIP_FPS, (w, h))
+            if writer.isOpened():
+                writer.release()
+                break
+        except Exception:
+            writer = None
+    if os.path.exists(probe_path):
+        try:
+            os.remove(probe_path)
+        except OSError:
+            pass
+    # Uses the last computed fourcc even if probing failed, and VideoWriter will signal if it cant open
+    fourcc = cv2.VideoWriter_fourcc(*fourcc_candidates[-1]) if writer is None else fourcc
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     filename = f"violation_{track_id}_{timestamp}.mp4"
     filepath = os.path.join(VIDEO_CLIPS_DIR, filename)
     writer = cv2.VideoWriter(filepath, fourcc, CLIP_FPS, (w, h))
@@ -220,7 +250,7 @@ def check_violations():
             
             violation = {
                 "id": f"{track_id}_{int(current_time)}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "track_id": int(track_id),
                 "class": str(data["class"]),
                 "duration_seconds": int(duration),
@@ -476,7 +506,7 @@ def log_usage():
     if data["action"] not in ["enter", "exit"]:
         return jsonify({"error": "Action must be 'enter' or 'exit'"}), 400
     entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "name": data["name"],
         "tableware": data["tableware"],
         "image": data["image"],
@@ -525,9 +555,14 @@ def serve_image(filename):
 
 @app.route("/clips/<filename>", methods=["GET"])
 def serve_clip(filename):
-    """Serve violation video clips."""
+    """Serve violation video clips with proper streaming headers."""
     from flask import send_from_directory
-    return send_from_directory(VIDEO_CLIPS_DIR, filename), 200
+    return send_from_directory(
+        VIDEO_CLIPS_DIR,
+        filename,
+        mimetype="video/mp4",
+        conditional=True
+    )
 
 
 # ============== WEBSOCKET EVENTS ==============
