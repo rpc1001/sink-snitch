@@ -58,6 +58,12 @@ export function onViolation(callback: (data: Violation) => void): () => void {
   return () => socket.off('violation', callback);
 }
 
+export function onViolationUpdate(callback: (data: Violation) => void): () => void {
+  const socket = getSocket();
+  socket.on('violation_update', callback);
+  return () => socket.off('violation_update', callback);
+}
+
 export function onSinkRegion(callback: (data: { sink_region: SinkRegion }) => void): () => void {
   const socket = getSocket();
   socket.on('sink_region', callback);

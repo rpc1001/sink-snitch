@@ -13,12 +13,8 @@ import requests
 
 app = Flask(__name__)
 CORS(app)
-# socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-# I switched to threading async mode bcuz I ran into eventlet compatibility issues on newer Python
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# ============== CONFIG ==============
-LOG_FILE = "usage_logs.jsonl"
 VIOLATIONS_FILE = "violations.jsonl"
 CONFIG_FILE = "sink_config.json"
 IMAGES_DIR = "violation_images"
@@ -32,9 +28,9 @@ MAX_CLIP_SECONDS = PRE_ROLL_SECONDS + POST_ENTRY_SECONDS  # 4s before entry + 4s
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # Discord limit
 
 # Timeouts
-OCCLUSION_TIMEOUT = 120     # Keep "buried" objects in memory for 2 minutes
-NORMAL_TIMEOUT = 5          # Forget objects outside the sink quickly (5 seconds)
-EXIT_TIMEOUT = 5.0          # If an object vanishes (no detection), drop after 5s
+OCCLUSION_TIMEOUT = 120 
+NORMAL_TIMEOUT = 5 
+EXIT_TIMEOUT = 5.0
 
 # Create images directory
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -100,11 +96,11 @@ def process_violation_queue():
             socketio.sleep(0.05)
 
 # ============== LOGGING ==============
-def log_to_file(entry, filepath=LOG_FILE):
+def log_to_file(entry, filepath):
     with open(filepath, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
-def read_logs(filepath=LOG_FILE):
+def read_logs(filepath):
     if not os.path.exists(filepath):
         return []
     with open(filepath, "r") as f:
@@ -252,9 +248,9 @@ def start_clip_for_track(track_id):
         return
     active_clips[track_id] = {
         "pre": [f.copy() for f in video_buffer],  # rolling buffer before entry
-        "post": [],                               # frames after entry
-        "ready_clip": None,                       # path once built
-        "building": False                         # avoid duplicate builders
+        "post": [], # frames after entry
+        "ready_clip": None,  # path once built
+        "building": False  # avoid duplicate builders
     }
 
 def append_frame_to_clip(track_id, frame):
@@ -349,7 +345,6 @@ def delete_clip(track_id):
     if track_id in active_clips:
         del active_clips[track_id]
 
-# ============== NOTIFICATIONS ==============
 def build_violation_links(violation):
     """Return (image_url, clip_url) for sharing externally."""
     base_url = os.environ.get("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL)
@@ -499,27 +494,6 @@ def check_violations():
                 })
             tracked_objects[track_id]["violation_logged"] = True
             print(f"Violation detected: {violation['id']} ({violation['class']})")
-
-def load_yolo_model():
-    """Load YOLO model - called from background task."""
-    global model, model_loading
-    model_loading = True
-    try:
-        from ultralytics import YOLO
-        model = YOLO("yolov8s-world.pt")
-        model.set_classes([
-            "plate", "bowl", "cup", "mug", "glass",
-            "pot", "pan", "frying pan", "saucepan",
-            "fork", "spoon", "knife", "spatula",
-            "bottle", "jar", "tupperware", "container",
-            "cutting board", "colander", "strainer"
-        ])
-        print("YOLO model loaded successfully")
-    except Exception as e:
-        print(f"Failed to load YOLO model: {e}")
-        model = None
-    finally:
-        model_loading = False
 
 def run_camera_stream():
     """Background thread that streams camera, optionally with YOLO detection."""
@@ -755,29 +729,6 @@ def run_camera_stream():
             cap = None
 
 # ============== REST ENDPOINTS ==============
-@app.route("/log_usage", methods=["POST"])
-def log_usage():
-    data = request.get_json()
-    required_fields = ["name", "tableware", "image", "action"]
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Missing required fields"}), 400
-    if data["action"] not in ["enter", "exit"]:
-        return jsonify({"error": "Action must be 'enter' or 'exit'"}), 400
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "name": data["name"],
-        "tableware": data["tableware"],
-        "image": data["image"],
-        "action": data["action"]
-    }
-    log_to_file(entry)
-    return jsonify({"status": "logged", "entry": entry}), 201
-
-@app.route("/get_logs", methods=["GET"])
-def get_logs():
-    logs = read_logs()
-    return jsonify({"count": len(logs), "records": logs}), 200
-
 @app.route("/get_violations", methods=["GET"])
 def get_violations():
     violations = read_logs(VIOLATIONS_FILE)
