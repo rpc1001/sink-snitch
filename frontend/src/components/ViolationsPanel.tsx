@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { API_BASE, getViolations, deleteViolation } from '../lib/api';
-import { onViolation } from '../lib/socket';
+import { API_BASE, getViolations, deleteViolation, clearViolations } from '../lib/api';
+import { onViolation, onViolationUpdate } from '../lib/socket';
 import type { Violation } from '../types';
 
 type Filter = 'active' | 'resolved' | 'all';
@@ -14,6 +14,7 @@ export function ViolationsPanel({
   violations,
   setViolations,
 }: ViolationsPanelProps) {
+  const MAX_VIOLATIONS = 15;
   const [filter, setFilter] = useState<Filter>('active');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +29,21 @@ export function ViolationsPanel({
   // Listen for real-time violations
   useEffect(() => {
     const cleanup = onViolation((violation) => {
-      setViolations(prev => [violation as Violation, ...prev]);
+      setViolations(prev => [violation as Violation, ...prev].slice(0, MAX_VIOLATIONS));
+    });
+    return cleanup;
+  }, [setViolations]);
+
+  // listen for violation updates (when clip finishes encoding)
+  useEffect(() => {
+    const cleanup = onViolationUpdate((updatedViolation) => {
+      setViolations(prev =>
+        prev.map(v =>
+          String((v as any).id) === String((updatedViolation as any).id)
+            ? updatedViolation as Violation
+            : v
+        )
+      );
     });
     return cleanup;
   }, [setViolations]);
@@ -39,10 +54,26 @@ export function ViolationsPanel({
       setError(null);
       const resp = await getViolations();
       // Server returns oldest-first; reverse so newest are on top
-      setViolations((resp.records as Violation[]).slice().reverse());
+      setViolations((resp.records as Violation[]).slice().reverse().slice(0, MAX_VIOLATIONS));
     } catch (err) {
       console.error(err);
       setError('Failed to load violations');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    const ok = window.confirm('Clear all violations?');
+    if (!ok) return;
+    try {
+      setLoading(true);
+      await clearViolations();
+      setViolations([]);
+      setExpandedId(null);
+    } catch (err) {
+      console.error(err);
+      setError('Failed to clear violations');
     } finally {
       setLoading(false);
     }
@@ -178,6 +209,15 @@ export function ViolationsPanel({
           >
             ⟳ Refresh
           </button>
+          <button
+            type="button"
+            className="refresh-button refresh-button--small"
+            onClick={handleClearAll}
+            disabled={loading || !violations.length}
+            title="Clear all violations"
+          >
+            🗑 Clear
+          </button>
         </div>
       </div>
 
@@ -253,11 +293,6 @@ export function ViolationsPanel({
                     </span>
                   </div>
 
-                  <div className="violation-meta-row secondary">
-                    <span>
-                      Stayed in sink for {duration != null ? duration : '?'}s.
-                    </span>
-                  </div>
 
                   {isExpanded && (
                     <div className="violation-expanded-extra">
@@ -278,7 +313,14 @@ export function ViolationsPanel({
                         </div>
                       </div>
 
-                      {getClipUrl((v as any).violation_clip) && (
+                      {(v as any).processing ? (
+                        <div className="violation-video-container">
+                          <h4>Violation Clip</h4>
+                          <div className="video-pending">
+                            <p>Video encoding...</p>
+                          </div>
+                        </div>
+                      ) : getClipUrl((v as any).violation_clip) ? (
                         <div className="violation-video-container">
                           <h4>Violation Clip</h4>
                           <video
@@ -296,7 +338,7 @@ export function ViolationsPanel({
                             If playback is choppy, use the download button in your browser.
                           </p>
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   )}
                 </div>

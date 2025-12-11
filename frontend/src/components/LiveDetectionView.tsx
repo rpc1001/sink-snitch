@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { getSocketUrl, getSinkRegion } from '../lib/api';
+import { getSocketUrl, getSinkRegion, getViolationThreshold, setViolationThreshold } from '../lib/api';
 import type { FrameData, SinkRegion } from '../types';
 
 export function LiveDetectionView() {
@@ -15,13 +15,17 @@ export function LiveDetectionView() {
   const [tempRegion, setTempRegion] = useState<SinkRegion>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
-  
+  const [violationThresholdSeconds, setViolationThresholdSeconds] = useState<number>(30 * 60);
+  const [violationThresholdInput, setViolationThresholdInput] = useState<number>(30);
+  const [savingThreshold, setSavingThreshold] = useState(false);
+
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Initialize socket
   useEffect(() => {
+    // Force polling to avoid websocket transport errors when server runs in threading mode
     const newSocket = io(getSocketUrl(), {
-      transports: ['websocket', 'polling'],
+      transports: ['polling'],
     });
 
     newSocket.on('connect', () => {
@@ -59,6 +63,15 @@ export function LiveDetectionView() {
     getSinkRegion()
       .then(data => setSinkRegion(data.sink_region))
       .catch(err => console.error('Failed to load sink region:', err));
+
+    getViolationThreshold()
+      .then(data => {
+        if (typeof data.violation_threshold_seconds === 'number') {
+          setViolationThresholdSeconds(data.violation_threshold_seconds);
+          setViolationThresholdInput(data.violation_threshold_seconds / 60);
+        }
+      })
+      .catch(err => console.error('Failed to load violation threshold:', err));
 
     return () => {
       newSocket.disconnect();
@@ -145,6 +158,21 @@ export function LiveDetectionView() {
     }
   };
 
+  const handleSaveThreshold = async () => {
+    const minutes = Math.max(0.01, violationThresholdInput);
+    const seconds = minutes * 60;
+    setSavingThreshold(true);
+    try {
+      const resp = await setViolationThreshold(seconds);
+      setViolationThresholdSeconds(resp.violation_threshold_seconds);
+      setStatusMessage(`Violation time set to ${(resp.violation_threshold_seconds / 60).toFixed(2)} minutes`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save violation time');
+    } finally {
+      setSavingThreshold(false);
+    }
+  };
+
   // Only use displayRegion for the placeholder (backend draws on actual frames)
   const displayRegion = sinkRegion;
 
@@ -172,7 +200,7 @@ export function LiveDetectionView() {
         <div className="status-message info">{statusMessage}</div>
       )}
 
-      <div 
+      <div
         ref={containerRef}
         className={`video-container ${isDrawing ? 'drawing' : ''} ${cameraRunning && !detectionEnabled ? 'can-draw' : ''}`}
         onMouseDown={handleMouseDown}
@@ -181,9 +209,9 @@ export function LiveDetectionView() {
         onMouseLeave={handleMouseUp}
       >
         {frameData?.image ? (
-          <img 
-            src={frameData.image} 
-            alt="Live camera feed" 
+          <img
+            src={frameData.image}
+            alt="Live camera feed"
             className="detection-feed"
             draggable={false}
           />
@@ -202,7 +230,7 @@ export function LiveDetectionView() {
 
         {/* Sink region overlay - only show when drawing (before camera has it) */}
         {displayRegion && !frameData && (
-          <div 
+          <div
             className="sink-region-overlay"
             style={{
               left: `${displayRegion[0] * 100}%`,
@@ -214,10 +242,10 @@ export function LiveDetectionView() {
             <span className="sink-label">SINK AREA</span>
           </div>
         )}
-        
+
         {/* Show temporary drawing region while actively drawing */}
         {tempRegion && (
-          <div 
+          <div
             className="sink-region-overlay drawing"
             style={{
               left: `${tempRegion[0] * 100}%`,
@@ -256,6 +284,30 @@ export function LiveDetectionView() {
                 <button onClick={handleStopCamera} className="btn btn-danger">
                   Stop Camera
                 </button>
+                <div className="threshold-control">
+                  <label htmlFor="violation-threshold">Violation time (minutes)</label>
+                  <div className="threshold-input-row">
+                    <input
+                      id="violation-threshold"
+                      type="number"
+                      min={1}
+                      step={0.1}
+                      value={violationThresholdInput}
+                      onChange={(e) => setViolationThresholdInput(Number(e.target.value))}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleSaveThreshold}
+                      disabled={savingThreshold}
+                    >
+                      {savingThreshold ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                  <div className="threshold-hint">
+                    Currently {(violationThresholdSeconds / 60).toFixed(2)} min
+                  </div>
+                </div>
               </>
             ) : (
               <>
@@ -279,7 +331,7 @@ export function LiveDetectionView() {
           </div>
           <div className="stat">
             <span className="stat-label">Max Time in Sink:</span>
-            <span className={`stat-value ${frameData.sink_time > 20 ? 'warning' : ''}`}>
+            <span className={`stat-value ${frameData.sink_time > violationThresholdSeconds ? 'warning' : ''}`}>
               {formatTime(frameData.sink_time)}
             </span>
           </div>
@@ -308,7 +360,7 @@ export function LiveDetectionView() {
                   <td>
                     {obj.violation_logged ? (
                       <span className="violation-badge">⚠️ VIOLATION</span>
-                    ) : obj.time_in_sink > 15 ? (
+                    ) : obj.time_in_sink > violationThresholdSeconds ? (
                       <span className="warning-badge">Warning</span>
                     ) : (
                       <span className="ok-badge">Tracking</span>
@@ -327,7 +379,7 @@ export function LiveDetectionView() {
           <li><strong>Start Camera</strong> - Begin the live video feed</li>
           <li><strong>Draw Sink Region</strong> - Click and drag on the video to mark your sink</li>
           <li><strong>Start Detection</strong> - Enable object tracking</li>
-          <li>Objects in the sink for &gt;20 seconds trigger a violation alert (testing mode)</li>
+          <li>Objects in the sink longer than your set violation time trigger a violation alert.</li>
         </ol>
       </div>
     </div>

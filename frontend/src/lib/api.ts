@@ -126,3 +126,37 @@ export async function saveWebhookUrl(webhookUrl: string | null): Promise<{ statu
 
   return response.json();
 }
+
+export async function getViolationThreshold(): Promise<{ violation_threshold_seconds: number }> {
+  const response = await fetch(`${API_BASE}/violation_threshold`);
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function setViolationThreshold(seconds: number): Promise<{ status: string; violation_threshold_seconds: number }> {
+  const response = await fetch(`${API_BASE}/violation_threshold`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ violation_threshold_seconds: seconds }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function clearViolations(): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/violations`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+}
