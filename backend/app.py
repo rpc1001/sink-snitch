@@ -25,9 +25,10 @@ IMAGES_DIR = "violation_images"
 VIDEO_CLIPS_DIR = "violation_clips"
 NOTIFICATION_CONFIG_FILE = "notification_config.json"
 DEFAULT_PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:5001")
-PRE_ROLL_SECONDS = 5
+PRE_ROLL_SECONDS = 2
+POST_ENTRY_SECONDS = 2
 CLIP_FPS = 15
-MAX_CLIP_SECONDS = 12  # keep clips small for Discord attachment limits
+MAX_CLIP_SECONDS = PRE_ROLL_SECONDS + POST_ENTRY_SECONDS  # 4s before entry + 4s after
 MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024  # Discord limit
 
 # Timeouts
@@ -52,13 +53,14 @@ current_frame = None  # Store current frame for violation snapshots
 tracked_objects = {}  # {track_id: {first_seen, last_seen, class, violation_logged, entry_image, box, last_in_sink}}
 track_id_mapping = {}  # Maps new track IDs to existing ones if they overlap
 VIOLATION_THRESHOLD = 30 * 60  # default 30 minutes
-IOU_MERGE_THRESHOLD = 0.9  # If IoU > this, consider it the same object (very strict)
+IOU_MERGE_THRESHOLD = 0.99  # If IoU > this, consider it the same object (extremely strict)
 video_buffer = deque(maxlen=int(PRE_ROLL_SECONDS * CLIP_FPS)) # Rolling buffer for video clips
 active_clips = {}
 last_buffer_time = 0.0
 notification_config = {"webhook_url": None}
 violation_queue = deque()  # queue of violations to process in background
 violation_worker_started = False
+cached_fourcc = None  # cache codec to avoid probing every time
 
 
 def process_violation_queue():
@@ -73,23 +75,24 @@ def process_violation_queue():
                 box = violation.get("box")
                 track_id = violation.get("track_id")
 
-                # Save violation image
+                # save violation image
                 violation_image = save_frame_as_image(frame, f"violation_{track_id}", box=box, label=label)
 
-                # Finalize clip
+                # finalize clip (this is slow)
                 violation_clip = finalize_clip(track_id)
 
                 violation["violation_image"] = violation_image
                 violation["violation_clip"] = violation_clip
+                violation["processing"] = False
 
-                # Log and emit
+                # log and emit update
                 log_to_file(violation, VIOLATIONS_FILE)
-                socketio.emit('violation', violation)
+                socketio.emit('violation_update', violation)
 
-                # Send notification asynchronously (already background)
+                # send notification
                 send_discord_notification(violation)
 
-                print(f"Violation processed: {violation}")
+                print(f"Violation processed: {violation['id']}")
             else:
                 socketio.sleep(0.01)
         except Exception as e:
@@ -244,62 +247,100 @@ def update_video_buffer(frame):
         last_buffer_time = current_time
 
 def start_clip_for_track(track_id):
-    """ Send a clip with the buffer when a new object enters the sink. """
-
+    """Start recording clip with pre-roll when object enters sink (entry-focused clip)."""
     if track_id in active_clips:
-        return 
-    active_clips[track_id] = {"frames": [f.copy() for f in video_buffer]}
+        return
+    active_clips[track_id] = {
+        "pre": [f.copy() for f in video_buffer],  # rolling buffer before entry
+        "post": [],                               # frames after entry
+        "ready_clip": None,                       # path once built
+        "building": False                         # avoid duplicate builders
+    }
 
 def append_frame_to_clip(track_id, frame):
-    """ Add the current frame to the active clip for a track. """
-
+    """Collect post-entry frames; once enough, build clip."""
     if frame is None:
         return
     if track_id not in active_clips:
         start_clip_for_track(track_id)
-    active_clips[track_id]["frames"].append(frame.copy())
 
-def finalize_clip(track_id):
-    """ Write a video clip to disk for a track that has violated. """
+    clip = active_clips[track_id]
+    if clip.get("ready_clip") or clip.get("building"):
+        return  # already built or building in background
 
-    clip = active_clips.get(track_id, None)
-    if not clip or not clip.get("frames"):
+    max_post_frames = int(POST_ENTRY_SECONDS * CLIP_FPS)
+    if len(clip["post"]) < max_post_frames:
+        clip["post"].append(frame.copy())
+
+    # If we've collected enough post frames, build the clip in background
+    if len(clip["post"]) >= max_post_frames:
+        clip["building"] = True
+        socketio.start_background_task(build_clip_background, track_id)
+
+def build_clip_background(track_id):
+    """Background wrapper to build clip without blocking detection loop."""
+    try:
+        finalize_clip(track_id, force_build=True)
+    except Exception as e:
+        print(f"Clip build error for track {track_id}: {e}")
+    finally:
+        clip = active_clips.get(track_id)
+        if clip:
+            clip["building"] = False
+
+def finalize_clip(track_id, force_build=False):
+    """Return (or build) the entry-focused clip for a track."""
+    global cached_fourcc
+
+    clip = active_clips.get(track_id)
+    if not clip:
         return None
-    frames = clip["frames"]
-    # Limit clip length to avoid oversized attachments (Discord 8MB)
-    max_frames = int(CLIP_FPS * MAX_CLIP_SECONDS)
-    if len(frames) > max_frames:
-        frames = frames[-max_frames:]
+
+    # If already built, return it
+    if clip.get("ready_clip"):
+        return clip["ready_clip"]
+
+    # Only build when either forced or we have some post frames
+    if not force_build and len(clip.get("post", [])) == 0:
+        return None
+
+    frames = clip.get("pre", []) + clip.get("post", [])
+    if not frames:
+        return None
+
     h, w = frames[0].shape[:2]
 
-    # prefers H.264/avc1 for better browser compatibility but falls back to mp4v if unavailable
-    fourcc_candidates = ['avc1', 'H264', 'mp4v']
-    writer = None
-    probe_path = os.path.join(VIDEO_CLIPS_DIR, ".codec_probe.mp4")
-    for codec in fourcc_candidates:
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*codec)
-            writer = cv2.VideoWriter(probe_path, fourcc, CLIP_FPS, (w, h))
-            if writer.isOpened():
-                writer.release()
-                break
-        except Exception:
-            writer = None
-    if os.path.exists(probe_path):
-        try:
-            os.remove(probe_path)
-        except OSError:
-            pass
-    # Uses the last computed fourcc even if probing failed, and VideoWriter will signal if it cant open
-    fourcc = cv2.VideoWriter_fourcc(*fourcc_candidates[-1]) if writer is None else fourcc
+    # Probe codec only once and cache it
+    if cached_fourcc is None:
+        fourcc_candidates = ['avc1', 'H264', 'mp4v']
+        probe_path = os.path.join(VIDEO_CLIPS_DIR, ".codec_probe.mp4")
+        for codec in fourcc_candidates:
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                writer = cv2.VideoWriter(probe_path, fourcc, CLIP_FPS, (w, h))
+                if writer.isOpened():
+                    writer.release()
+                    cached_fourcc = fourcc
+                    break
+            except Exception:
+                pass
+        if os.path.exists(probe_path):
+            try:
+                os.remove(probe_path)
+            except OSError:
+                pass
+        if cached_fourcc is None:
+            cached_fourcc = cv2.VideoWriter_fourcc(*fourcc_candidates[-1])
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     filename = f"violation_{track_id}_{timestamp}.mp4"
     filepath = os.path.join(VIDEO_CLIPS_DIR, filename)
-    writer = cv2.VideoWriter(filepath, fourcc, CLIP_FPS, (w, h))
+    writer = cv2.VideoWriter(filepath, cached_fourcc, CLIP_FPS, (w, h))
     for f in frames:
         writer.write(f)
     writer.release()
+
+    clip["ready_clip"] = filename
     return filename
 
 def delete_clip(track_id):
@@ -327,13 +368,12 @@ def send_discord_notification(violation):
         return
 
     image_url, clip_url = build_violation_links(violation)
-    content = f"Dish violation: {violation.get('class', 'unknown')} in sink for {violation.get('duration_seconds', 0)}s ({violation.get('status', 'unknown')})."
+    content = f"Dish violation: {violation.get('class', 'unknown')} exceeded threshold ({violation.get('status', 'unknown')})."
 
     embed = {
         "title": "Sink Snitch Violation",
         "description": f"Object #{violation.get('track_id')} exceeded the allowed time in the sink.",
         "fields": [
-            {"name": "Duration", "value": f"{violation.get('duration_seconds', 0)} seconds", "inline": True},
             {"name": "Status", "value": violation.get("status", "unknown"), "inline": True},
         ],
     }
@@ -439,22 +479,26 @@ def check_violations():
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "track_id": int(track_id),
                 "class": str(data["class"]),
-                "duration_seconds": int(duration),
                 "entry_image": data.get("entry_image"),
-                "violation_image": None,  # will be filled by worker
-                "violation_clip": None,   # will be filled by worker
+                "violation_image": None,
+                "violation_clip": None,
                 "status": "occluded" if is_occluded else "visible",
+                "processing": True,
                 "box": data.get("box")
             }
-            # Enqueue for background processing to avoid blocking frame loop
+
+            # emit immediately so UI shows it
+            socketio.emit('violation', violation)
+
+            # enqueue for background processing
             if current_frame is not None:
                 violation_queue.append({
                     "violation": violation,
                     "frame": current_frame.copy(),
-                    "label": f"#{track_id} {data['class']} - {status_str} ({int(duration)}s)"
+                    "label": f"#{track_id} {data['class']} - {status_str}"
                 })
             tracked_objects[track_id]["violation_logged"] = True
-            print(f"Violation enqueued: {violation['id']} ({violation['class']})")
+            print(f"Violation detected: {violation['id']} ({violation['class']})")
 
 def load_yolo_model():
     """Load YOLO model - called from background task."""

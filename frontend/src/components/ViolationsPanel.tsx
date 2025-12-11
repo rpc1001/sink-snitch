@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { API_BASE, getViolations, deleteViolation, clearViolations } from '../lib/api';
-import { onViolation } from '../lib/socket';
+import { onViolation, onViolationUpdate } from '../lib/socket';
 import type { Violation } from '../types';
 
 type Filter = 'active' | 'resolved' | 'all';
@@ -30,6 +30,20 @@ export function ViolationsPanel({
   useEffect(() => {
     const cleanup = onViolation((violation) => {
       setViolations(prev => [violation as Violation, ...prev].slice(0, MAX_VIOLATIONS));
+    });
+    return cleanup;
+  }, [setViolations]);
+
+  // listen for violation updates (when clip finishes encoding)
+  useEffect(() => {
+    const cleanup = onViolationUpdate((updatedViolation) => {
+      setViolations(prev =>
+        prev.map(v =>
+          String((v as any).id) === String((updatedViolation as any).id)
+            ? updatedViolation as Violation
+            : v
+        )
+      );
     });
     return cleanup;
   }, [setViolations]);
@@ -279,11 +293,6 @@ export function ViolationsPanel({
                     </span>
                   </div>
 
-                  <div className="violation-meta-row secondary">
-                    <span>
-                      Stayed in sink for {duration != null ? duration : '?'}s.
-                    </span>
-                  </div>
 
                   {isExpanded && (
                     <div className="violation-expanded-extra">
@@ -304,7 +313,14 @@ export function ViolationsPanel({
                         </div>
                       </div>
 
-                      {getClipUrl((v as any).violation_clip) && (
+                      {(v as any).processing ? (
+                        <div className="violation-video-container">
+                          <h4>Violation Clip</h4>
+                          <div className="video-pending">
+                            <p>Video encoding...</p>
+                          </div>
+                        </div>
+                      ) : getClipUrl((v as any).violation_clip) ? (
                         <div className="violation-video-container">
                           <h4>Violation Clip</h4>
                           <video
@@ -322,7 +338,7 @@ export function ViolationsPanel({
                             If playback is choppy, use the download button in your browser.
                           </p>
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   )}
                 </div>
