@@ -1,4 +1,14 @@
 .venv/
 venv/
 .DS_Store
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+node_modules/
+
 notification_config.json
+sink_config.json
+violations.jsonl
+violation_images/
+violation_clips/
